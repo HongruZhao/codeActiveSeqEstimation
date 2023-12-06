@@ -1,0 +1,2118 @@
+---
+title: "Source code for synthetic experiments in “Globally-Optimal Greedy Experiment Selection for Active Sequential Estimation”"
+author: "Hongru Zhao"
+date: "2023-11-04"
+output: pdf_document
+---
+\section{Basic Functions}
+```{r  }
+# basic matrix function such as eye, ones, zeros, dot
+library(pracma)
+library(latex2exp)
+library(glmnet)
+library(dplyr)
+### Kendall' tau
+library(Kendall)
+library(igraph)
+library(parallel)
+num_cores=7
+#### solving optimal proportion
+{
+  ### projection functions
+  project_to_simplex <- function(pi_0) {
+    # Sort pi_0 in decreasing order
+    sorted_pi <- sort(pi_0, decreasing = TRUE)
+    # Compute cumulative sum
+    cumsum_pi <- cumsum(sorted_pi)
+    # Find the largest index rho
+    rho<-max(which(sorted_pi*seq_along(sorted_pi)>(cumsum_pi - 1)))
+    # Calculate lambda
+    lambda <- (cumsum_pi[rho] - 1) / rho
+    # Return the projection of pi_0 onto the simplex
+    return(pmax(pi_0 - lambda, 0))
+  }
+  project_onto_box <- function(v, box=c(-5,5)) {
+    return(pmin(pmax(v, box[1]), box[2]))
+  }
+  # using projected gradient descent to solve optimal proportion
+  projected_gradient_descent <- function(pi_0_initial, num_iters=10000, learning_rate=0.01, grad_obj, tol = 1e-8) {
+    pi_0 <- pi_0_initial
+    for (i in 1:num_iters) {
+      pi_0_old <- pi_0
+      gradient <- grad_obj(pi_0)  # Compute the gradient
+      pi_0 <- pi_0 - learning_rate * gradient  # Gradient step
+      pi_0 <- project_to_simplex(pi_0)  # Projection step
+      # Check for convergence
+      if (max(abs(pi_0 - pi_0_old)) < tol) {
+        break
+      }
+    }
+    return(pi_0)
+  }
+  obj_inverse_full <- function(pi_0) {
+    t0 <- design_X %*% theta + offset_b
+    p0 <- exp(t0) / (1 + exp(t0))
+    return_val <- matrix(rep(0,p^2), nrow = p, ncol = p)
+    for (a in 1:k){
+      term <- design_X[a,] %*% t(design_X[a,]) * pi_0[a] * p0[a] * (1 - p0[a])
+      return_val <- return_val + term
+    }
+    return(solve(return_val))
+  }
+  obj_f_full <- function(pi_0) { 
+    return(sum( diag( obj_inverse_full(pi_0) ) ))
+  }
+  # Gradient of the objective function
+  grad_f_full <- function(pi_0) {
+    t0 <- design_X %*% theta + offset_b
+    p0 <- exp(t0) / (1 + exp(t0))
+    # Embed the content of obj_inverse_full
+    return_val <- matrix(rep(0,p^2), nrow = p, ncol = p)
+    for (a in 1:k){
+      term <- design_X[a,] %*% t(design_X[a,]) * pi_0[a] * p0[a] * (1 - p0[a])
+      return_val <- return_val + term
+    }
+    I_pi = solve(return_val)
+    # Continue with grad_f_full
+    z <- numeric(k)
+    for (a in 1:k){
+      z[a] <- sum( (I_pi %*% design_X[a,])^2 )  * p0[a] * (1 - p0[a])
+    }
+    return(-z)
+  }
+}
+### calculate I^{\pi}
+I_pi_truncate <- function(design_X, p0, n_d, epsilon = 1e-11) {
+  # Adjust p0 values based on epsilon
+  p0[p0 < epsilon|p0 >1- epsilon] <- epsilon
+  # Compute the weights
+  w <- n_d * p0 * (1 - p0)
+  # Scale the rows of design_X by the weights
+  X_scaled <- design_X * w
+  # Compute the matrix product
+  result <- t(design_X) %*% X_scaled
+  return(result)
+}
+
+# GI0/GI1 selection for computerized adaptive testing (CAT) for simulation study 1 in Section 7 
+adapt_seq_tr_glmnet <- function( design_X, init_data,  method.order = 1 , n_max = 100 , pi_optimized, off_set=off_set ,n_rep) {
+#  design_X represents the design matrix for all possible experiments
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  n_d=rep(n_rep,k)
+  offset_b=dt_adp$OFFSET_b
+  L2_Dis=rep(0,n-k0)
+#  pi_loss=rep(0,n-k0)
+  #  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    t0 <- -abs(as.numeric(design_X %*% theta_loop ) + off_set )
+    #expit function
+    p0 <- plogis(t0)
+    return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+    if (method.order ==1)
+    {
+      inv_X=solve(return_val , t(design_X) ) 
+      zero_first_order_index= -colSums(inv_X^2)*p0*(1-p0)
+    }else{
+      for (a in 1:k){
+        # Obtain the vector of fitted probabilities
+        zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+      }
+    }
+    action=which.min(zero_first_order_index)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for two parameter logistic (2PL) model
+    linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop) )
+}
+
+opt_seq_tr_glmnet <- function( design_X, init_data,  method.order = 1 , n_max = 100 , pi_optimized, off_set=off_set ,n_rep) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  n_d=rep(n_rep,k)
+  offset_b=dt_adp$OFFSET_b
+  L2_Dis=rep(0,n-k0)
+#  pi_loss=rep(0,n-k0)
+  #  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    t0 <- -abs(as.numeric(design_X %*% theta ) + off_set )
+    #expit function
+    p0 <- plogis(t0)
+    return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+    if (method.order ==1)
+    {
+      inv_X=solve(return_val , t(design_X) ) 
+      zero_first_order_index= -colSums(inv_X^2)*p0*(1-p0)
+    }else{
+      for (a in 1:k){
+        # Obtain the vector of fitted probabilities
+        zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+      }
+    }
+    action=which.min(zero_first_order_index)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for two parameter logistic (2PL) model
+    linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+    #    pi_loss[i-k0] = obj_f_full(n_d/i)
+    #    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop) )
+}
+
+adapt_seq_tr_glmnet_stopping_time <- function( design_X, init_data,  method.order = 1 , n_max = 100000 , pi_optimized, off_set=off_set ,n_rep, stopping_d,stopping_c) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  n_d=rep(n_rep,k)
+  offset_b=dt_adp$OFFSET_b
+  L2_Dis=rep(0,n-k0)
+  #  pi_loss=rep(0,n-k0)
+  #  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,      
+                           standardize=FALSE,
+                           intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,
+                           lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    t0 <- -abs(as.numeric(design_X %*% theta_loop ) + off_set )
+    #expit function
+    p0 <- plogis(t0)
+    return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+    if(dot(solve(return_val,stopping_d) ,stopping_d)<stopping_c){break}
+    if (method.order ==1)
+    {
+      inv_X=solve(return_val , t(design_X) ) 
+      zero_first_order_index= -colSums(inv_X^2)*p0*(1-p0)
+    }else{
+      for (a in 1:k){
+        zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+      }
+    }
+    action=which.min(zero_first_order_index)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for two parameter logistic (2PL) model
+    linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+    #    pi_loss[i-k0] = obj_f_full(n_d/i)
+    #    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop) )
+}
+
+```
+\section{Simulation study 1: computerized adaptive testing (CAT)}
+\subsection{Task 1: Optimal Proportion}
+```{r}
+# initial data
+node=seq(-1.5,1.5,0.1)
+pi_matrix= matrix(0 ,nrow=length(node), ncol=3)
+for(i in 1:length(node) ){
+  {
+    p=2
+    k=3
+    theta_1_fixed=1
+    theta_2_nonfixed=node[i]
+    # Generate the logistic regression coefficients
+    theta <- c(theta_1_fixed,theta_2_nonfixed)
+    samples <- matrix(c(1,0,1/2,0,1,1), ncol = p)
+    offset_b=c(-0.1,0,0)
+    # Create a data frame with the random samples
+    dt1 <- as.data.frame( samples )
+    # Generate the linear predictor for two parameter logistic (2PL) model
+    linear_predictor <- samples %*% theta + offset_b
+    {
+      # Generate the probabilities using the logistic function
+      probabilities <- 1 / (1 + exp(-linear_predictor))
+    } 
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(k, size = 1, prob = probabilities)
+    dt1$Y <- y0
+    dt1$OFFSET_b <-offset_b
+    dt_adp=dt1
+    suppressWarnings({model <- glm(Y ~ .-1-OFFSET_b, data = dt1, family = binomial(link = "logit"),offset=OFFSET_b) })
+    design_X <- model.matrix(model)  
+  }
+  pi_0_initial=rep(1/k,k)
+  num_iter=10000
+  learning_rate=0.001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial,num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full)
+  pi_matrix[i,]=pi_optimized
+}
+```
+
+\subsection{Optimal \(\pi^*\)  as a function of \(\theta_2\)}
+Plot \( \pi^*\) as a function of \(\theta=(1,\theta_2),\theta_2\in[-1.5,1.5]\).  
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+par(mfrow = c(1, 1))
+# Create a vector of labels for the legend
+legend_labels <- c(expression(paste(pi, "*(1)")), expression(paste(pi, "*(2)")), expression(paste(pi, "*(3)")))
+
+plot(node, pi_matrix[, 1],ylim = c(0, 0.75),  type = "l", col = 1, xlab = expression(theta[2]),ylab="Optimal Proportion")
+
+for(i in 2:ncol(pi_matrix)) {
+  lines(node, pi_matrix[, i], col = i)
+}
+# Add a legend to the plot
+legend("topright", legend = legend_labels, col = 1:3, lty = 1, cex = 0.8,bty="n")
+```
+
+\subsection{Task 4: Histogram and CI}
+Let  \(\theta=(1,0)\). Generate initial data.
+```{r}
+# Generate initial data for CAT
+generate_data_cat <- function(n_rep){
+  p=2
+  k=3
+  theta_1_fixed=1
+  theta_2_nonfixed=0
+  # Generate the logistic regression coefficients
+  theta <- c(theta_1_fixed,theta_2_nonfixed)
+  samples <- matrix(c(1,0,1/2,0,1,1), ncol = p)
+  offset_b=c(-0.1,0,0)
+  for(jjj in 1:n_rep){
+  dt1 <- as.data.frame( samples )
+  # Generate the linear predictor for two parameter logistic (2PL) model
+  linear_predictor <- samples %*% theta + offset_b
+  {
+  # Generate the probabilities using the logistic function
+    probabilities <- 1 / (1 + exp(-linear_predictor))
+  } 
+  # Generate the response variable Y based on the probabilities
+  y0 <- rbinom(k, size = 1, prob = probabilities)
+  dt1$Y <- y0
+  dt1$OFFSET_b <-offset_b
+  if(jjj==1){dt_adp=dt1}else{dt_adp=rbind(dt_adp,dt1)}
+  }
+  # Obtain design matrix design_X
+  suppressWarnings({model <- glm(Y ~ .-1-OFFSET_b, data = dt1, family = binomial(link = "logit"),offset=OFFSET_b) })
+  design_X <- model.matrix(model)  
+  return(list(theta=theta, design_X=design_X, offset_b=offset_b, dt1=dt_adp ))
+}
+
+p=2
+k=3
+n_rep=3
+ddaattaa=generate_data_cat(n_rep)
+theta=ddaattaa$theta
+design_X=ddaattaa$design_X
+offset_b=ddaattaa$offset_b
+dt1=ddaattaa$dt1
+
+init_data=dt1
+  set.seed(123456)
+  l_max=1000
+  k0 = nrow(dt1)
+  n_max = 50
+  pi_optimized=pi_matrix[16,]
+```
+
+Plot of Histogram vs standard normal Density  
+```{r}
+generate_plot_data <- function(design_X, init_data, theta, offset_b, repeat_n=50, n_max=50, opt_pi, method.order=1) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0=nrow(init_data)
+  ### set initial data
+  theta_matrix = matrix(0, ncol = p, nrow = repeat_n)
+  for(j in 1:repeat_n){
+    output0=adapt_seq_tr_glmnet(design_X, init_data, 
+                                method.order=method.order,
+                                n_max=n_max, 
+                                pi_optimized=pi_optimized,
+                                off_set=offset_b,
+                                n_rep)
+    dt_adp=output0$final_data
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    theta_matrix[j,] = theta_loop-theta
+  }    
+  theta_vec=theta_loop-theta
+  return(list(  theta_matrix=theta_matrix,
+                theta_vec=theta_vec))
+}
+n_m=50
+l_mmax=1000
+output0=generate_plot_data(design_X=design_X,  init_data=init_data, theta=theta, offset_b=offset_b,  repeat_n=l_mmax, n_max=n_m, opt_pi=pi_optimized, method.order=0)
+theta_matrix=output0$theta_matrix
+{
+par(mfrow = c(1, 2))
+rand_vec = c(1, 0)
+t_vec=theta_matrix%*%rand_vec * sqrt(n_m) /as.numeric(sqrt(rand_vec %*% obj_inverse_full(pi_optimized)%*% rand_vec))
+# Define the x values
+x <- seq(min(t_vec), max(t_vec), by = 0.01)
+# Calculate the y values using dnorm
+y <- dnorm(x, sd=1)
+# Create a histogram
+hist(t_vec,breaks=15 , probability = TRUE,   main = "Histogram for GI0",xlab="")
+# Add the normal distribution line
+lines(x, y, col = "blue")
+
+rand_vec = c(0, 1)
+t_vec=theta_matrix%*%rand_vec * sqrt(n_m)/as.numeric(sqrt(rand_vec %*% obj_inverse_full(pi_optimized)%*% rand_vec))
+# Define the x values
+x <- seq(min(t_vec), max(t_vec), by = 0.01)
+# Calculate the y values using dnorm
+y <- dnorm(x)
+
+# Create a histogram
+hist(t_vec,breaks=15 , probability = TRUE,   main = "Histogram for GI0" ,xlab="")
+# Add the normal distribution line
+lines(x, y, col = "blue")
+
+# Reset to default single plot layout
+par(mfrow = c(1, 1))
+}
+
+output1=generate_plot_data(design_X=design_X,  init_data=init_data, theta=theta, offset_b=offset_b,  repeat_n=l_mmax, n_max=n_m, opt_pi=pi_optimized, method.order=1)
+theta_matrix=output1$theta_matrix
+
+{
+par(mfrow = c(1, 2))
+## Create the first plot (this will go on the left)
+rand_vec = c(1, 0)
+t_vec=theta_matrix%*%rand_vec * sqrt(n_m) /as.numeric(sqrt(rand_vec %*% obj_inverse_full(pi_optimized)%*% rand_vec))
+# Define the x values
+x <- seq(min(t_vec), max(t_vec), by = 0.01)
+# Calculate the y values using dnorm
+y <- dnorm(x, sd=1 )
+# Create a histogram
+hist(t_vec,breaks=15 , probability = TRUE,   main = "Histogram for GI1",xlab="")
+# Add the normal distribution line
+lines(x, y, col = "blue")
+
+## Create the second plot (this will go on the right)
+rand_vec = c(0, 1)
+# Generate some random data
+t_vec=theta_matrix%*%rand_vec * sqrt(n_m)/as.numeric(sqrt(rand_vec %*% obj_inverse_full(pi_optimized)%*% rand_vec))
+# Define the x values
+x <- seq(min(t_vec), max(t_vec), by = 0.01)
+# Calculate the y values using dnorm
+y <- dnorm(x)
+
+# Create a histogram
+hist(t_vec,breaks=15 , probability = TRUE,   main = "Histogram for GI1" ,xlab="")
+# Add the normal distribution line
+lines(x, y, col = "blue")
+# Reset to default single plot layout
+par(mfrow = c(1, 1))
+}
+```
+
+Coverage probability for CI 
+```{r}
+p=2
+k=3
+n_rep=3
+set.seed(345)
+ddaattaa=generate_data_cat(n_rep)
+theta=ddaattaa$theta
+design_X=ddaattaa$design_X
+offset_b=ddaattaa$offset_b
+dt1=ddaattaa$dt1
+
+init_data=dt1
+k0=nrow(dt1)
+pi_optimized=pi_matrix[16,]
+
+l_max=1000
+z_score=qnorm(1-0.05/2)
+stopping_d=rnorm(2)
+stopping_d=stopping_d/norm(stopping_d,"2")
+  
+counting_non_random=rep(0,6) 
+dim(counting_non_random)=c(2,3)
+n_care=c(25,50,100)
+for(m.order in c(0,1)){
+for(ijk in 1:3){
+for(ij in 1:l_max){
+  n_max=n_care[ijk]
+  output_CI=adapt_seq_tr_glmnet( design_X, init_data, method.order = m.order , n_max = n_max , pi_optimized, off_set=offset_b ,n_rep)
+  t0 <- -abs(as.numeric(design_X %*% output_CI$final_beta ) + offset_b )
+    #expit function
+  p0 <- plogis(t0)
+  return_val=I_pi_truncate(design_X, p0, output_CI$n_d, epsilon = 0)
+  if(
+    abs(dot(stopping_d,output_CI$final_beta-theta)) <
+    z_score*sqrt(dot(solve(return_val, stopping_d),stopping_d) ) ){counting_non_random[m.order+1,ijk]=counting_non_random[m.order+1,ijk]+1}
+    }
+  }
+}
+```
+
+Coverage probability for stopping time CI 
+```{r}
+counting_random=rep(0,2)  
+dim(counting_random)=c(2,1)
+c_care=0.1
+
+t11=Sys.time()
+for(method.order in c(0,1)){
+  for(ijk in 1){
+    for(ij in 1:l_max){
+  n_max=n_care[ijk]
+  stopping_d=rnorm(2)
+  stopping_d=stopping_d/norm(stopping_d,"2")
+  stopping_c=c_care[ijk]
+  output_CI=adapt_seq_tr_glmnet_stopping_time( design_X, init_data, method.order = method.order , n_max = 100000 , pi_optimized, off_set=offset_b ,n_rep, stopping_d,stopping_c^2)
+  if(
+    abs(dot(stopping_d,output_CI$final_beta-theta))<z_score*stopping_c
+    ){counting_random[method.order+1,ijk]=counting_random[method.order+1,ijk]+1}
+    }
+  }
+}  
+t22=Sys.time()
+print(t22-t11)
+counting_random
+```
+
+\subsection{Task 2: Plot of empirical \(\overline{\pi}_n \) vs optimal \(\pi^*\)}
+```{r}
+n_max = 50
+# Empirical Proportions
+method.order = 0
+  {
+    set.seed(123)
+    pi_optimized=pi_matrix[16,]
+    k = nrow( design_X )
+    p = ncol( design_X )
+    k0=nrow(init_data)
+    n = n_max
+    dt_adp=init_data 
+    n_d=rep(n_rep,k)
+
+    n_d_matrix_Gi=matrix(0,nrow=n-k0, ncol=k)
+    L2_Dis_Gi=rep(0,n-k0)
+    j=0
+    for (i in (k0+1):n){
+      zero_first_order_index=rep(0,k)
+      suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+      })
+      theta_loop=as.numeric(model_loop$beta)
+      L2_Dis_Gi[i-k0]=sum( (theta_loop - theta)^2  )
+      t0 <- design_X %*% theta_loop + offset_b
+      p0 <- as.numeric(1 / (1 + exp(-t0)) )
+      return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+      if (method.order ==1)
+      {
+        iinnvv=solve(return_val)
+        for (a in 1:k){
+          zero_first_order_index[a]=-sum((iinnvv%*%design_X[a,])^2)*p0[a]*(1-p0[a])
+        }    
+      }
+      else
+      {
+        for (a in 1:k){
+          # Obtain the vector of fitted probabilities
+          zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+        } 
+      }
+      action=which.min(zero_first_order_index)
+      n_d[action]=n_d[action]+1
+      # Generate the new linear predictor for two parameter logistic (2PL) model
+      linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+      # Generate the probabilities using the logistic function
+      probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+      # Generate the response variable Y based on the probabilities
+      y0 <- rbinom(1, size = 1, prob = probabilities)
+      dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+      n_d_matrix_Gi[i-k0,]=n_d/sum(n_d)
+    }
+  }
+   ### Plot of empirical proportion for GI0
+  { 
+    par(mfrow = c(1, 2))
+    node2=(k0+1):n
+    # Create a vector of labels for the legend
+    legend_labels <- c(expression(paste("Emperical ",pi[n] ,"(1)     ")), expression(paste("Emperical ",pi[n] ,"(2)")), expression(paste("Emperical ",pi[n] ,"(3)")),
+                       expression(paste(pi ,"*(1)")), expression(paste(pi ,"*(2)")), expression(paste(pi ,"*(3)")) )
+    # Set up the plot with the first column of the matrix
+    plot(node2 , n_d_matrix_Gi[ , 1],ylim = c(0, 0.75), type = "p", col = 1, xlab = "Sample Size",ylab="",pch = 20,cex.lab=1.5)
+    abline(h = pi_optimized[1],lty = 2)
+    # Use a loop to add each subsequent column to the plot as a new line
+    for(i in 2:ncol(pi_matrix)) {
+      points(node2 , n_d_matrix_Gi[ , i], col = i, lty=2, pch = 20)
+      abline(h = pi_optimized[i],  col = i,lty = 2)
+    }
+    # Add a legend to the plot
+    legend("topright", legend = legend_labels, col = c(1:3, 1:3), pch = c(20, 20, 20, NA, NA, NA), lty = c(NA, NA, NA, 2, 2, 2), ncol=2,bty="n")
+    title(main = "Empirical Proportion for GI0")
+      }
+
+method.order = 1
+  {
+  ### GI method
+  {
+    set.seed(123)
+    pi_optimized=pi_matrix[16,]
+    k = nrow( design_X )
+    p = ncol( design_X )
+    k0=nrow(init_data)
+    n = n_max
+    dt_adp=init_data 
+    n_d=rep(n_rep,k)
+
+    n_d_matrix_Gi=matrix(0,nrow=n-k0, ncol=k)
+    L2_Dis_Gi=rep(0,n-k0)
+    Kendall_rank_Gi=rep(0,n-k0)
+    theta_loop_init=rep(0,p)
+    j=0
+    for (i in (k0+1):n){
+      zero_first_order_index=rep(0,k)
+      suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+      })
+      theta_loop=as.numeric(model_loop$beta)
+      L2_Dis_Gi[i-k0]=sum( (theta_loop - theta)^2  )
+      t0 <- design_X %*% theta_loop + offset_b
+      p0 <- as.numeric(1 / (1 + exp(-t0)) )
+      return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+      if (method.order ==1)
+      {   
+        iinnvv=solve(return_val)
+        for (a in 1:k){
+          # Obtain the vector of fitted probabilities
+          t0=exp(dot(theta_loop,design_X[a,])  +offset_b[a])
+          p_0=t0/(1+t0)
+          zero_first_order_index[a]=-sum((iinnvv%*%design_X[a,])^2)*p_0*(1-p_0)
+        }    
+      }
+      else
+      {
+        for (a in 1:k){
+          # Obtain the vector of fitted probabilities
+          zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+        } 
+      }
+      action=which.min(zero_first_order_index)
+      n_d[action]=n_d[action]+1
+      # Generate the new linear predictor for two parameter logistic (2PL) model
+      linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+      # Generate the probabilities using the logistic function
+      probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+      # Generate the response variable Y based on the probabilities
+      y0 <- rbinom(1, size = 1, prob = probabilities)
+      dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+      n_d_matrix_Gi[i-k0,]=n_d/sum(n_d)
+    }
+  }
+}
+  ### Plot of empirical proportion for GI1
+  {
+    node2=(k0+1):n
+    # Create a vector of labels for the legend
+    legend_labels <- c(expression(paste("Emperical ",pi[n] ,"(1)     ")), expression(paste("Emperical ",pi[n] ,"(2)")), expression(paste("Emperical ",pi[n] ,"(3)")),
+                       expression(paste(pi ,"*(1)")), expression(paste(pi ,"*(2)")), expression(paste(pi ,"*(3)")) )
+    #legend_labels=NULL
+    # Set up the plot with the first column of the matrix
+    plot(node2 , n_d_matrix_Gi[ , 1] ,ylim = c(0, 0.75), type = "p", col = 1, xlab = "Sample Size",ylab="",pch = 20,cex.lab=1.5)
+    abline(h = pi_optimized[1],lty = 2)
+    
+    # Use a loop to add each subsequent column to the plot as a new line
+    for(i in 2:ncol(pi_matrix)) {
+      points(node2 , n_d_matrix_Gi[ , i], col = i, lty=2, pch = 20)
+      abline(h = pi_optimized[i],  col = i,lty = 2)
+      
+    }
+    
+    # Add a legend to the plot
+    legend("topright", legend = legend_labels, col = c(1:3, 1:3), pch = c(20, 20, 20, NA, NA, NA), lty = c(NA, NA, NA, 2, 2, 2),ncol=2,bty="n")
+    title(main = "Empirical Proportion for GI1")
+  }
+par(mfrow = c(1, 1))
+
+```
+
+\subsection{Task 3: GI0/GI1/uniform/opt non-random select/opt random selection distance}
+```{r}
+p=2
+k=3
+n_rep=3
+set.seed(334455)
+
+ddaattaa=generate_data_cat(n_rep)
+theta=ddaattaa$theta
+design_X=ddaattaa$design_X
+offset_b=ddaattaa$offset_b
+dt1=ddaattaa$dt1
+
+init_data=dt1
+k0=nrow(init_data)
+pi_optimized=pi_matrix[16,]
+
+n_max=50
+l_max=20000
+#GI0/GI1/uniform/opt non-random select/opt random
+  L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  L2_Dis_Gi0opt_ave=rep(0,n_max-k0)
+  L2_Dis_Gi1opt_ave=rep(0,n_max-k0)
+  L2_Dis_unif_ave=rep(0,n_max-k0)
+  L2_Dis_opt_D=rep(0,n_max-k0)
+  L2_Dis_opt_R=rep(0,n_max-k0)
+  
+  L2_Dis_unif=rep(0,n_max-k0)
+  L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  L2_Dis_opt_ave_R=rep(0,n_max-k0)
+for(l in 1:l_max){
+p=2
+k=3
+n_rep=3
+
+  method.order = 0
+  ### GI0 method
+  output_GI0=adapt_seq_tr_glmnet( design_X, init_data, 
+                                  method.order = method.order,
+                                  n_max = n_max ,
+                                  pi_optimized, 
+                                  off_set=offset_b,
+                                  n_rep) 
+  L2_Dis_Gi0_ave=L2_Dis_Gi0_ave+output_GI0$L2_Dis
+  
+  method.order = 1
+  ### GI1 method
+  output_GI1=adapt_seq_tr_glmnet( design_X, init_data, 
+                                  method.order = method.order,
+                                  n_max = n_max ,
+                                  pi_optimized,
+                                  off_set=offset_b ,n_rep) 
+  L2_Dis_Gi1_ave=L2_Dis_Gi1_ave+output_GI1$L2_Dis
+  
+  method.order = 0
+  ### GI0 opt
+  output_GI0_opt=  opt_seq_tr_glmnet( design_X, init_data,
+                                  method.order = method.order,
+                                  n_max = n_max ,
+                                  pi_optimized,
+                                  off_set=offset_b,
+                                  n_rep) 
+  L2_Dis_Gi0opt_ave=L2_Dis_Gi0opt_ave+output_GI0_opt$L2_Dis
+  
+  method.order = 1
+  ### GI1 opt
+  output_GI1_opt=opt_seq_tr_glmnet( design_X, init_data, 
+                                  method.order = method.order,
+                                  n_max = n_max ,
+                                  pi_optimized,
+                                  off_set=offset_b,
+                                  n_rep)
+  L2_Dis_Gi1opt_ave=L2_Dis_Gi1opt_ave+output_GI1_opt$L2_Dis
+  
+  ### uniform
+  {
+    dt_adp_unif=init_data 
+    n_d_unif=rep(n_rep,k)
+    for (i in (k0+1):n_max){
+      suppressWarnings({ 
+      model_loop <- glmnet(dt_adp_unif[,c(1,2)],
+                           dt_adp_unif$Y,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp_unif$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,
+                           lambda=0)
+      })
+      theta_loop=as.numeric(model_loop$beta)
+      L2_Dis_unif[i-k0]=sum( (theta_loop - theta)^2  )
+      L2_Dis_unif_ave[i-k0]=L2_Dis_unif_ave[i-k0]+L2_Dis_unif[i-k0]
+      action=sample(1:k,1)
+      n_d_unif[action]=n_d_unif[action]+1
+      # Generate the new linear predictor for two parameter logistic (2PL) model
+      linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+      # Generate the probabilities using the logistic function
+      probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+      # Generate the response variable Y based on the probabilities
+      y0 <- rbinom(1, size = 1, prob = probabilities)
+      dt_adp_unif=as.data.frame(rbind(dt_adp_unif,c(design_X[action,],y0,offset_b[action])) )
+#      n_d_matrix_unif[i-k0,]=n_d_unif/sum(n_d_unif)
+    }
+  }
+  ### opt non-random
+  {
+    dt_adp=init_data 
+    n_d=rep(n_rep,k)
+    for (i in (k0+1):n_max){
+      zero_first_order_index=rep(0,k)
+            suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+      })
+      theta_loop=as.numeric(model_loop$beta)
+      L2_Dis_opt_D[i-k0]=sum( (theta_loop - theta)^2  )
+      L2_Dis_opt_ave_D[i-k0]=L2_Dis_opt_ave_D[i-k0]+L2_Dis_opt_D[i-k0]
+      ### nonrandom
+      action = which.min( n_d/sum(n_d) - pi_optimized)
+      n_d[action]=n_d[action]+1
+      # Generate the new linear predictor for two parameter logistic (2PL) model
+      linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+      # Generate the probabilities using the logistic function
+      probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+      # Generate the response variable Y based on the probabilities
+      y0 <- rbinom(1, size = 1, prob = probabilities)
+      dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+    }
+  }
+  ### opt random select
+  {
+    dt_adp=init_data 
+    n_d=rep(n_rep,k)
+    for (i in (k0+1):n_max){
+      zero_first_order_index=rep(0,k)
+            suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,c(1,2)], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           offset=dt_adp$OFFSET_b,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-3,upper.limits=3,lambda=0)
+      })
+      theta_loop=as.numeric(model_loop$beta)
+      L2_Dis_opt_R[i-k0]=sum( (theta_loop - theta)^2  )
+      L2_Dis_opt_ave_R[i-k0]=L2_Dis_opt_ave_R[i-k0]+L2_Dis_opt_R[i-k0]
+      ### random
+      action=sample(1:k,1,prob=pi_optimized)
+      n_d[action]=n_d[action]+1
+      # Generate the new linear predictor for two parameter logistic (2PL) model
+      linear_predictor <- dot(design_X[action,],theta)+offset_b[action]
+      # Generate the probabilities using the logistic function
+      probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+      # Generate the response variable Y based on the probabilities
+      y0 <- rbinom(1, size = 1, prob = probabilities)
+      dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0,offset_b[action])) )
+    }
+  }
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.1*max(L2_Dis_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab="MSE",
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, L2_Dis_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, L2_Dis_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+#  lines(node2 , L2_Dis_Gi0opt , col = 3)
+#  lines(node2 , L2_Dis_Gi1opt , col = 7,lty=4)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+
+\section{Simulation study 2: Rank Aggregation}
+```{r}
+# generate ranking data
+data_random_generator <- function(p_plus, connected_pair_matrix){
+  p=p_plus-1
+  k=nrow(connected_pair_matrix)
+  # Generate the logistic regression coefficients
+  theta <- runif(p ,min = -2, max = 2)
+  design_matrix <-  matrix(0, nrow = k, ncol = p_plus)
+  for (row in 1:k ) {
+    design_matrix[row, as.numeric(connected_pair_matrix[ row,2]) ]  <- -1
+    design_matrix[row, as.numeric(connected_pair_matrix[ row,1]) ]  <-  1
+  }
+  samples=design_matrix[,-1]
+  # Create a data frame with the random samples
+  dt1 <- as.data.frame( samples )
+  # Generate the linear predictor  
+  linear_predictor <- samples %*% theta  
+  # Generate the probabilities using the logistic function
+  probabilities <- 1 / (1 + exp(-linear_predictor))
+  # Generate the response variable Y based on the probabilities
+  y0 <- rbinom(k, size = 1, prob = probabilities)
+  dt1$Y <- y0
+  dt_adp=dt1
+  return( list(data_random = dt_adp, theta=theta)  )
+}
+
+init_edge_generate_RA <- function(p_plus, n_init, method = c("full", "min", "regular"), reg=4) {
+  # Choose the method based on the input
+  selected_method <- match.arg(method)
+  p = p_plus-1
+  # Implement different behaviors based on the selected_method
+  if (selected_method == "regular") {
+    ### Create a random regular graph
+    regu_graph=sample_k_regular(p_plus, reg, directed = FALSE, multiple=FALSE)
+    edge_regu_graph=as_edgelist(regu_graph)
+    pair_matrix = edge_regu_graph
+  }else{
+    ### generate full Erdos-Renyi model
+    full_graph=sample_gnm(p_plus, p_plus*(p_plus-1)/2)
+    edge_full_graph=as_edgelist(full_graph)
+  }
+  if (selected_method == "full") {
+    pair_matrix = edge_full_graph
+  } else if (selected_method == "min") {
+    ### Samples from the spanning trees of graph full_graph randomly and uniformly
+    min_tree_pre=sample_spanning_tree(full_graph)
+    min_tree <- subgraph.edges(full_graph, min_tree_pre)
+    edge_min_tree=as_edgelist(min_tree)
+    pair_matrix = edge_min_tree
+  }
+  k_seq = nrow(pair_matrix)
+  # define design matrix
+  design_matrix <-  matrix(0, nrow = k_seq, ncol = p_plus)
+  for (row in 1:k_seq ) {
+    design_matrix[row, as.numeric(pair_matrix[ row,2]) ]  <-  -1
+    design_matrix[row, as.numeric(pair_matrix[ row,1]) ]  <-   1
+  }
+  design_X=design_matrix[,-1]
+  ### Samples from the spanning trees of graph full_graph randomly and uniformly
+  gra = make_graph(t(pair_matrix),directed=FALSE)
+  min_tree_pre_init  = sample_spanning_tree(gra)
+  min_tree_init <- subgraph.edges(gra, min_tree_pre_init)
+  edge_min_tree_init = as_edgelist(min_tree_init)
+  sample_pair_matrix=rbind(edge_min_tree_init,
+              pair_matrix[sample(k_seq,n_init - p, replace = T),])
+
+  ddt=data_random_generator(p_plus,sample_pair_matrix)
+  theta=ddt$theta
+  init_data=ddt$data_random
+  
+  sample_pair_matrix.df=as.data.frame(sample_pair_matrix)
+  sample_pair_matrix.df$Y=init_data$Y
+  # Aggregating the data
+  suppressWarnings({
+  aggregated_data <- sample_pair_matrix.df %>%
+    group_by(V1, V2) %>%
+    summarise(
+      count_A_won_TRUE  = sum(Y,   na.rm = TRUE),
+      count_A_won_FALSE = sum(!Y,  na.rm = TRUE),
+      .groups = "drop" # This drops the grouping
+    )
+  })
+  n_d_init=rep(0,k_seq)
+  for (i in 1:k_seq){
+    row=which(aggregated_data$V1==pair_matrix[i,1]&aggregated_data$V2==pair_matrix[i,2])
+    #row=sample(row,1)
+    vc=aggregated_data$count_A_won_TRUE+aggregated_data$count_A_won_FALSE
+    if( length(vc[row]) == 1 ){n_d_init[i]=vc[row]}
+  }
+  return(list(pair_matrix=pair_matrix, design_X=design_X, 
+              n_d_init=n_d_init, init_data=init_data, theta=theta ))
+}
+
+# GI0/GI1 selection for Rank Aggregation (RA) for simulation study 2 in Section 7 
+adapt_seq_tr_glmnet_RA <- function( design_X, init_data,  method.order = 1 , n_max = 100 , pi_optimized, n_d, box_R=3) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  L2_Dis=rep(0,n-k0)
+  pi_loss=rep(0,n-k0)
+  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,1:p], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-box_R,
+                           upper.limits=box_R,
+                           lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    t0 <- -abs(as.numeric(design_X %*% theta_loop )    )
+    #expit function
+    p0 <- plogis(t0)
+    return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+    if (method.order ==1)
+    {
+      inv_X=solve(return_val , t(design_X) ) 
+      zero_first_order_index= -colSums(inv_X^2)*p0*(1-p0)
+    }else{
+      for (a in 1:k){
+        # Obtain the vector of fitted probabilities
+        zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+      }
+    }
+    action=which.min(zero_first_order_index)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for BT model
+    linear_predictor <- dot(design_X[action,],theta)
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0 ) ) )
+    pi_loss[i-k0] = obj_f_full(n_d/i)
+    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop, pi_loss=pi_loss, pi_L2_Dis=pi_L2_Dis) )
+}
+adapt_unif_glmnet_RA <- function( design_X, init_data,  n_max = 100 , pi_optimized, n_d, box_R=3) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  L2_Dis=rep(0,n-k0)
+  pi_loss=rep(0,n-k0)
+  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,1:p], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-box_R,
+                           upper.limits=box_R,
+                           lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    action=sample(1:k,1)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for BT model
+    linear_predictor <- dot(design_X[action,],theta)
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0 ) ) )
+    pi_loss[i-k0] = obj_f_full(n_d/i)
+    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop, pi_loss=pi_loss, pi_L2_Dis=pi_L2_Dis) )
+}
+adapt_opt_D_glmnet_RA <- function( design_X, init_data,  n_max = 100 , pi_optimized, n_d, box_R=3) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  L2_Dis=rep(0,n-k0)
+  pi_loss=rep(0,n-k0)
+  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,1:p], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-box_R,
+                           upper.limits=box_R,
+                           lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    action = which.min( n_d/sum(n_d) - pi_optimized)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for BT model
+    linear_predictor <- dot(design_X[action,],theta)
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0 ) ) )
+    pi_loss[i-k0] = obj_f_full(n_d/i)
+    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop, pi_loss=pi_loss, pi_L2_Dis=pi_L2_Dis) )
+}
+adapt_opt_R_glmnet_RA <- function( design_X, init_data,  n_max = 100 , pi_optimized, n_d, box_R=3) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  L2_Dis=rep(0,n-k0)
+  pi_loss=rep(0,n-k0)
+  pi_L2_Dis=rep(0,n-k0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,1:p], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-box_R,
+                           upper.limits=box_R,
+                           lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    action=sample(1:k,1,prob=pi_optimized)
+#    action = which.min( n_d/sum(n_d) - pi_optimized)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for BT model
+    linear_predictor <- dot(design_X[action,],theta)
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0 ) ) )
+    pi_loss[i-k0] = obj_f_full(n_d/i)
+    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop, pi_loss=pi_loss, pi_L2_Dis=pi_L2_Dis) )
+}
+
+```
+
+\subsection{Task 1: Calculation time }
+```{r}
+l_max=100
+col_ind=0
+cal_time = matrix(0,nrow=3,ncol=12)
+for(p in c(25, 50, 100,500) ){
+  # p_plus = p+1 number of objects
+  p_plus = p + 1
+  n_init=4*p
+  n_max=n_init+1
+  #
+  for(word in c( "min", "regular" ,"full")){
+    {
+  otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method=word)
+  n_d_init=otput$n_d_init
+  theta=otput$theta
+  init_data=otput$init_data
+  design_X=otput$design_X
+    }
+  col_ind=col_ind+1
+  for(kk in 1:l_max){
+  ### GI1
+  {
+    method.order = 1
+    {
+      k = nrow( design_X )
+      k0 = n_init
+      n = n_max
+      dt_adp=init_data 
+      n_d=n_d_init
+      ttttt_1=Sys.time() 
+      {
+        for (i in (k0+1):n){
+          zero_first_order_index=rep(0,k)
+          suppressWarnings({
+            model_loop <- glmnet(dt_adp[,-(p+1)],dt_adp$Y,  
+              family = "binomial", alpha = 0, 
+              standardize=FALSE,intercept=FALSE,
+              lower.limits=-3,upper.limits=3,lambda=0)
+            })
+          theta_loop=as.numeric(model_loop$beta)
+          t0 <- -abs(as.numeric(design_X %*% theta_loop ) )
+          #expit function
+          p0 <- plogis(t0)
+          return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+          {
+            inv_X=solve(return_val , t(design_X) ) 
+            zero_first_order_index= -colSums(inv_X^2)*p0*(1-p0)
+          }
+          action=which.min( zero_first_order_index )
+          n_d[action]=n_d[action] +1
+          Y=rbinom(1,1,plogis(dot(design_X[action,],theta)))
+          # Generate the response variable Y based on the probabilities
+          dt_adp = rbind(dt_adp,c(design_X[action,],Y) )
+        }
+      }
+      ttttt_2=Sys.time() 
+      cal_time[1,col_ind]=difftime(ttttt_2, ttttt_1, units = c("secs")) +cal_time[1,col_ind]
+    }
+  }
+  ### GI0 par
+  {
+    method.order = 0
+    {
+      k = nrow( design_X )
+      k0 = n_init
+      n = n_max
+      dt_adp=init_data 
+      n_d=n_d_init
+      cls <- makeCluster(num_cores)
+      ttttt_1=Sys.time() 
+      { 
+        for (i in (k0+1):n){
+          zero_first_order_index=rep(0,k)
+          model_loop <- glmnet(dt_adp[,-(p+1)],
+                               dt_adp$Y,  
+                               family = "binomial", alpha = 0, 
+                               standardize=FALSE,intercept=FALSE,
+                               lower.limits=-3,upper.limits=3,lambda=0)
+          theta_loop=as.numeric(model_loop$beta)
+          # Obtain the vector of fitted probabilities
+          t0 <- -abs(as.numeric(design_X %*% theta_loop ) )
+          #expit function
+          p0 <- plogis(t0)
+          return_val= I_pi_truncate(design_X, p0, n_d, epsilon = 0) 
+          {
+            clusterExport(cls,c('return_val','p0','design_X'))
+            zero_first_order_index=parSapply(cls, 1:k, function(a) {
+              return(
+                sum(diag(solve(return_val +design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+              )
+            })
+          }
+          action=which.min( zero_first_order_index )
+          n_d[action]=n_d[action] +1
+          Y=rbinom(1,1,plogis(dot(design_X[action,],theta)))
+          # Generate the response variable Y based on the probabilities
+          dt_adp = rbind(dt_adp,c(design_X[action,],Y) )
+        }
+      }
+      ttttt_2=Sys.time() 
+      stopCluster(cls)
+      cal_time[2,col_ind]=difftime(ttttt_2, ttttt_1, units = c("secs")) +cal_time[2,col_ind]
+    }
+  }
+  ### GI0 un-par
+  {
+    method.order = 0
+    {
+      k = nrow( design_X )
+      k0 = n_init
+      n = n_max
+      dt_adp=init_data 
+      n_d=n_d_init
+      ttttt_1=Sys.time() 
+      { 
+        for (i in (k0+1):n){
+          zero_first_order_index=rep(0,k)
+          model_loop <- glmnet(dt_adp[,-(p+1)],
+                               dt_adp$Y,  
+                               family = "binomial", alpha = 0, 
+                               standardize=FALSE,intercept=FALSE,
+                               lower.limits=-3,upper.limits=3,lambda=0)
+          theta_loop=as.numeric(model_loop$beta)
+          # Obtain the vector of fitted probabilities
+          t0 <- -abs(as.numeric(design_X %*% theta_loop ) )
+          #expit function
+          p0 <- plogis(t0)
+          return_val= I_pi_truncate(design_X, p0, n_d, epsilon = 0) 
+          for(a in 1:k) {
+            zero_first_order_index[a] <- sum(diag(
+              solve( return_val  + design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))))
+          }
+          action=which.min( zero_first_order_index )
+          n_d[action]=n_d[action] +1
+          Y=rbinom(1,1,plogis(dot(design_X[action,],theta)))
+          # Generate the response variable Y based on the probabilities
+          dt_adp = rbind(dt_adp,c(design_X[action,],Y) )
+        }
+      }
+      ttttt_2=Sys.time() 
+      cal_time[3,col_ind]=difftime(ttttt_2, ttttt_1, units = c("secs")) +cal_time[3,col_ind]    }
+  }
+  }
+  }
+}
+round(cal_time, 3)
+```
+\subsection{Task 2: Estimation Accuracy--$p$ and $k$ are small}
+```{r}
+# initial data
+p=10
+p_plus = p + 1
+n_init=2*p
+n_max=100
+l_max=20000
+
+set.seed(12)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" ,reg=4)
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+#GI0/GI1/uniform/opt non-random select/opt random
+  L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  L2_Dis_unif_ave=rep(0,n_max-k0)
+  L2_Dis_opt_D=rep(0,n_max-k0)
+  L2_Dis_opt_R=rep(0,n_max-k0)
+  L2_Dis_unif=rep(0,n_max-k0)
+  L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+  pi_L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  pi_L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  pi_L2_Dis_unif_ave=rep(0,n_max-k0)
+  pi_L2_Dis_opt_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_R=rep(0,n_max-k0)
+  pi_L2_Dis_unif=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+
+  
+  pi_loss_Gi0_ave=rep(0,n_max-k0)
+  pi_loss_Gi1_ave=rep(0,n_max-k0)
+  pi_loss_unif_ave=rep(0,n_max-k0)
+  pi_loss_opt_D=rep(0,n_max-k0)
+  pi_loss_opt_R=rep(0,n_max-k0)
+  pi_loss_unif=rep(0,n_max-k0)
+  pi_loss_opt_ave_D=rep(0,n_max-k0)
+  pi_loss_opt_ave_R=rep(0,n_max-k0)
+  
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=100000
+  learning_rate=0.00001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full)
+}
+for(kk in 1:l_max){
+
+# GI1
+ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+L2_Dis_Gi1_ave = L2_Dis_Gi1_ave + ot1$L2_Dis
+pi_L2_Dis_Gi1_ave=pi_L2_Dis_Gi1_ave+ot1$pi_L2_Dis
+pi_loss_Gi1_ave=pi_loss_Gi1_ave+ot1$pi_loss
+
+# GI0
+ot0=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+L2_Dis_Gi0_ave = L2_Dis_Gi0_ave + ot0$L2_Dis
+pi_L2_Dis_Gi0_ave=pi_L2_Dis_Gi0_ave+ot0$pi_L2_Dis
+pi_loss_Gi0_ave=pi_loss_Gi0_ave+ot0$pi_loss
+
+# unif
+ot_unif=adapt_unif_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_unif_ave=L2_Dis_unif_ave+ot_unif$L2_Dis
+pi_L2_Dis_unif_ave=pi_L2_Dis_unif_ave+ot_unif$pi_L2_Dis
+pi_loss_unif_ave=pi_loss_unif_ave+ot_unif$pi_loss
+
+# opt non-random
+ot_D= adapt_opt_D_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+
+L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
+pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
+pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss
+
+# opt random select
+ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
+pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
+pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.1*max(L2_Dis_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab="MSE",
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, L2_Dis_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, L2_Dis_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, pi_L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.2*max(pi_L2_Dis_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab=expression(D[n]),
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, pi_L2_Dis_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, pi_L2_Dis_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, pi_L2_Dis_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, pi_L2_Dis_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, pi_loss_Gi0_ave/l_max ,ylim = c(0, 1.2*max(pi_loss_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab=expression(F[n]),
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, pi_loss_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, pi_loss_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, pi_loss_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, pi_loss_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+\subsection{Task 3: Estimation Accuracy--$p$ and $k$ are large}
+```{r}
+# initial data
+p=50
+p_plus = p + 1
+n_init=p
+n_max=100
+l_max=20000
+
+set.seed(77)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" ,reg=4)
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+#GI0/GI1/uniform/opt non-random select/opt random
+  L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  L2_Dis_unif_ave=rep(0,n_max-k0)
+  L2_Dis_opt_D=rep(0,n_max-k0)
+  L2_Dis_opt_R=rep(0,n_max-k0)
+  L2_Dis_unif=rep(0,n_max-k0)
+  L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+  pi_L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  pi_L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  pi_L2_Dis_unif_ave=rep(0,n_max-k0)
+  pi_L2_Dis_opt_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_R=rep(0,n_max-k0)
+  pi_L2_Dis_unif=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+  pi_loss_Gi0_ave=rep(0,n_max-k0)
+  pi_loss_Gi1_ave=rep(0,n_max-k0)
+  pi_loss_unif_ave=rep(0,n_max-k0)
+  pi_loss_opt_D=rep(0,n_max-k0)
+  pi_loss_opt_R=rep(0,n_max-k0)
+  pi_loss_unif=rep(0,n_max-k0)
+  pi_loss_opt_ave_D=rep(0,n_max-k0)
+  pi_loss_opt_ave_R=rep(0,n_max-k0)
+  
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=100000000
+  learning_rate=0.0000001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-12)
+  }
+  
+for(kk in 1:l_max){
+
+# GI1
+ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = 100 , pi_optimized, n_d_init)
+L2_Dis_Gi1_ave = L2_Dis_Gi1_ave + ot1$L2_Dis
+pi_L2_Dis_Gi1_ave=pi_L2_Dis_Gi1_ave+ot1$pi_L2_Dis
+pi_loss_Gi1_ave=pi_loss_Gi1_ave+ot1$pi_loss
+
+# GI0
+ot0=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0 , n_max = 100 , pi_optimized, n_d_init)
+L2_Dis_Gi0_ave = L2_Dis_Gi0_ave + ot0$L2_Dis
+pi_L2_Dis_Gi0_ave=pi_L2_Dis_Gi0_ave+ot0$pi_L2_Dis
+pi_loss_Gi0_ave=pi_loss_Gi0_ave+ot0$pi_loss
+
+# unif
+ot_unif=adapt_unif_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_unif_ave=L2_Dis_unif_ave+ot_unif$L2_Dis
+pi_L2_Dis_unif_ave=pi_L2_Dis_unif_ave+ot_unif$pi_L2_Dis
+pi_loss_unif_ave=pi_loss_unif_ave+ot_unif$pi_loss
+
+# opt non-random
+ot_D= adapt_opt_D_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
+pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
+pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss
+
+# opt random select
+ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
+pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
+pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0.9*min(L2_Dis_Gi0_ave/l_max), 1.1*max(L2_Dis_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab="MSE",
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, L2_Dis_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, L2_Dis_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, pi_L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.2*max(pi_L2_Dis_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab=expression(D[n]),
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, pi_L2_Dis_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, pi_L2_Dis_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, pi_L2_Dis_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, pi_L2_Dis_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1))
+{
+  node2=(k0+1):n_max
+  # Create a vector of labels for the legend
+  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
+  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  plot(node2, pi_loss_Gi0_ave/l_max ,ylim = c(0, 2*max(pi_loss_Gi0_ave/l_max)), 
+       type = "o",  xlab = "Sample Size",ylab=expression(F[n]),
+       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, pi_loss_Gi1_ave/l_max, type = "o",
+        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, pi_loss_unif_ave/l_max, type = "o",
+        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
+  lines(node2, pi_loss_opt_ave_D/l_max, type = "o",
+        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
+  lines(node2, pi_loss_opt_ave_R/l_max, type = "o",
+        cex=0.7,  col = 6, lty=5, pch=7)
+  # Add a legend to the plot
+  legend("topright", legend = legend_labels, 
+         col = c("grey30", "green", 4, "red", 6), 
+         lwd = c(1, 1, 1, 1, 1),
+         lty = c(1, 2, 4, 3, 5), 
+         cex = 1,
+         pch = c(21,19, 24,3, 7), 
+         bty="n")
+
+}
+```
+
+\subsection{Task 4: Kendall's $\tau$ correlation.}
+Full graph $p=10$
+```{r}
+# initial data
+p=10
+p_plus = p + 1
+n_init=2*p
+n_max=2000
+l_max=100
+
+set.seed(7)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="full" )
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+edges=otput$pair_matrix
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+
+#GI0/GI1/uniform/opt non-random select/opt random
+kendall_Gi0_ave=rep(0,n_max-k0)
+kendall_Gi1_ave=rep(0,n_max-k0)
+kendall_unif_ave=rep(0,n_max-k0)
+#  kendall_opt_D=rep(0,n_max-k0)
+kendall_opt_US_ave=rep(0,n_max-k0)
+#  kendall_unif=rep(0,n_max-k0)
+kendall_opt_ave_D=rep(0,n_max-k0)
+kendall_opt_ave_R=rep(0,n_max-k0)
+
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=1000000
+  learning_rate=0.000001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
+}
+
+
+for(kk in 1:l_max){
+  
+  # GI1
+  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
+  
+  # GI0
+#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
+  
+  # unif
+  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
+  
+  # opt non-random
+  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
+  
+  # opt random
+  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
+
+  # uncertainly sampling
+  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
+  
+  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1)) 
+{
+  node2 <- (k0+1):n_max
+  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Sampling")
+  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
+       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
+       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
+  
+  lines(node2, kendall_unif_ave/l_max, type = "l",
+        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
+  
+  lines(node2, kendall_opt_ave_D/l_max, type = "l",
+        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
+  
+  lines(node2, kendall_opt_ave_R/l_max, type = "l",
+        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
+  
+  lines(node2, kendall_opt_US_ave/l_max, type = "l",
+        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
+  
+  legend("bottomright", legend = legend_labels, 
+         col = c("grey30", 4, "red", 6,7), 
+         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
+         lty = c(1, 4, 3, 5,6), 
+         cex = 1.5,  # Increase cex for a bigger text in the legend
+         bty = "n")
+}
+
+```
+
+4-rugelar graph $p=10$
+```{r}
+# initial data
+p=10
+p_plus = p + 1
+n_init=2*p
+n_max=2000
+l_max=100
+
+set.seed(7)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" )
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+edges=otput$pair_matrix
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+
+#GI0/GI1/uniform/opt non-random select/opt random
+kendall_Gi0_ave=rep(0,n_max-k0)
+kendall_Gi1_ave=rep(0,n_max-k0)
+kendall_unif_ave=rep(0,n_max-k0)
+#  kendall_opt_D=rep(0,n_max-k0)
+kendall_opt_US_ave=rep(0,n_max-k0)
+#  kendall_unif=rep(0,n_max-k0)
+kendall_opt_ave_D=rep(0,n_max-k0)
+kendall_opt_ave_R=rep(0,n_max-k0)
+
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=1000000
+  learning_rate=0.00005
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
+}
+
+for(kk in 1:l_max){
+  
+  # GI1
+  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
+  
+  # GI0
+#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
+  
+  # unif
+  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
+  
+  # opt non-random
+  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
+  
+  # opt random
+  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
+
+  # uncertainly sampling
+  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
+  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1)) 
+{
+  node2 <- (k0+1):n_max
+  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Samp")
+  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
+       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
+       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
+  
+  lines(node2, kendall_unif_ave/l_max, type = "l",
+        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
+  
+  lines(node2, kendall_opt_ave_D/l_max, type = "l",
+        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
+  
+  lines(node2, kendall_opt_ave_R/l_max, type = "l",
+        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
+  
+  lines(node2, kendall_opt_US_ave/l_max, type = "l",
+        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
+  
+  legend("bottomright", legend = legend_labels, 
+         col = c("grey30", 4, "red", 6,7), 
+         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
+         lty = c(1, 4, 3, 5,6), 
+         cex = 1.5,  # Increase cex for a bigger text in the legend
+         bty = "n")
+}
+
+```
+
+Full graph $p=50$
+```{r}
+# initial data
+p=50
+p_plus = p + 1
+n_init=p
+n_max=2000
+l_max=100
+
+set.seed(7)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="full" )
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+edges=otput$pair_matrix
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+
+#GI0/GI1/uniform/opt non-random select/opt random
+kendall_Gi0_ave=rep(0,n_max-k0)
+kendall_Gi1_ave=rep(0,n_max-k0)
+kendall_unif_ave=rep(0,n_max-k0)
+#  kendall_opt_D=rep(0,n_max-k0)
+kendall_opt_US_ave=rep(0,n_max-k0)
+#  kendall_unif=rep(0,n_max-k0)
+kendall_opt_ave_D=rep(0,n_max-k0)
+kendall_opt_ave_R=rep(0,n_max-k0)
+
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=1000000
+  learning_rate=0.00000005
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
+}
+
+
+for(kk in 1:l_max){
+  
+  # GI1
+  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
+  
+  # GI0
+#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
+  
+  # unif
+  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
+  
+  # opt non-random
+  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
+  
+  # opt random
+  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
+
+  # uncertainly sampling
+  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
+  
+  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1)) 
+{
+  node2 <- (k0+1):n_max
+  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Sampling")
+  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
+       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
+       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
+  lines(node2, kendall_unif_ave/l_max, type = "l",
+        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
+  lines(node2, kendall_opt_ave_D/l_max, type = "l",
+        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
+  lines(node2, kendall_opt_ave_R/l_max, type = "l",
+        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
+  lines(node2, kendall_opt_US_ave/l_max, type = "l",
+        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
+  legend("bottomright", legend = legend_labels, 
+         col = c("grey30", 4, "red", 6,7), 
+         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
+         lty = c(1, 4, 3, 5,6), 
+         cex = 1.5,  # Increase cex for a bigger text in the legend
+         bty = "n")
+}
+```
+
+4-rugelar graph $p=50$
+```{r}
+# initial data
+p=50
+p_plus = p + 1
+n_init=p
+n_max=2000
+l_max=100
+
+set.seed(77)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" )
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+edges=otput$pair_matrix
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+
+#GI0/GI1/uniform/opt non-random select/opt random
+kendall_Gi0_ave=rep(0,n_max-k0)
+kendall_Gi1_ave=rep(0,n_max-k0)
+kendall_unif_ave=rep(0,n_max-k0)
+#  kendall_opt_D=rep(0,n_max-k0)
+kendall_opt_US_ave=rep(0,n_max-k0)
+#  kendall_unif=rep(0,n_max-k0)
+kendall_opt_ave_D=rep(0,n_max-k0)
+kendall_opt_ave_R=rep(0,n_max-k0)
+
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=1000000
+  learning_rate=0.00000005
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
+}
+
+
+for(kk in 1:l_max){
+  
+  # GI1
+  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
+  
+  # GI0
+#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
+  
+  # unif
+  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
+  
+  # opt non-random
+  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
+  
+  # opt random
+  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
+
+  # uncertainly sampling
+  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
+  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1)) 
+{
+  node2 <- (k0+1):n_max
+  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Samp")
+  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
+       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
+       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
+  
+  lines(node2, kendall_unif_ave/l_max, type = "l",
+        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
+  
+  lines(node2, kendall_opt_ave_D/l_max, type = "l",
+        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
+  
+  lines(node2, kendall_opt_ave_R/l_max, type = "l",
+        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
+  
+  lines(node2, kendall_opt_US_ave/l_max, type = "l",
+        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
+  
+  legend("bottomright", legend = legend_labels, 
+         col = c("grey30", 4, "red", 6,7), 
+         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
+         lty = c(1, 4, 3, 5,6), 
+         cex = 1.5,  # Increase cex for a bigger text in the legend
+         bty = "n")
+}
+
+```
+
+
+\subsection{Task 5: Impact of the side length of compact set $\Theta$}
+```{r}
+# initial data
+p=50
+p_plus = p + 1
+n_init=p
+n_max=2000
+l_max=100
+
+set.seed(777)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular")
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+edges=otput$pair_matrix
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+
+# GI1 
+kendall_1=rep(0,n_max-k0)
+kendall_2=rep(0,n_max-k0)
+kendall_3=rep(0,n_max-k0)
+kendall_4=rep(0,n_max-k0)
+
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=100000000
+  learning_rate=0.0000001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-12)
+}
+
+for(kk in 1:l_max){
+  # GI1
+  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init,box_R=1)
+  kendall_1 = kendall_1 + ot1$kendall
+  
+  # GI1
+  ot2=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init,box_R=2)
+  kendall_2 = kendall_2 + ot2$kendall
+  
+  # GI1
+  ot3=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init,box_R=3)
+  kendall_3 = kendall_3 + ot3$kendall
+  
+  # GI1
+  ot4=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init,box_R=5)
+  kendall_4 = kendall_4 + ot4$kendall
+
+}
+```
+
+```{r}
+par(mar = c(4.2, 4.2, 1, 1)) 
+{
+  node2 <- (k0+1):n_max
+  legend_labels <- c("cube1", "cube2", "cube3", "cube5")
+  plot(node2, kendall_1/l_max, ylim = c(0.2, 1), 
+       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
+       cex = 1, col = "grey30", lwd = 2, cex.lab=1.5)  # Increase lwd here for a bolder line
+  
+  lines(node2, kendall_2/l_max, type = "l",
+        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
+  
+  lines(node2, kendall_3/l_max, type = "l",
+        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
+  
+  lines(node2, kendall_4/l_max, type = "l",
+        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
+  
+  
+  legend("bottomright", legend = legend_labels, 
+         col = c("grey30", 4, "red", 6), 
+         lwd = c(2, 2, 2, 2),  # Increase lwd in legend
+         lty = c(1, 4, 3, 5), 
+         cex = 1.5,  # Increase cex for a bigger text in the legend
+         bty = "n")
+}
+
+```
