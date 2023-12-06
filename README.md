@@ -8,6 +8,8 @@ Download the codes at: https://github.com/HongruZhao/codeActiveSeqEstimation/blo
 
 ## Codes for Real Data 
 Download the codes at: https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealData.R
+and https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealDataPlot.R
+
 
 ## References
 
