@@ -1135,6 +1135,55 @@ adapt_opt_R_glmnet_RA <- function( design_X, init_data,  n_max = 100 , pi_optimi
   }
   return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop, pi_loss=pi_loss, pi_L2_Dis=pi_L2_Dis) )
 }
+oracle_seq_tr_glmnet_RA <- function( design_X, init_data,  method.order = 1 , n_max = 100 , pi_optimized, n_d, box_R=3) {
+  k = nrow( design_X )
+  p = ncol( design_X )
+  k0 = nrow(init_data)
+  n = n_max
+  dt_adp=init_data 
+  L2_Dis=rep(0,n-k0)
+  pi_loss=rep(0,n-k0)
+  pi_L2_Dis=rep(0,n-k0)
+  t0 <- -abs(as.numeric(design_X %*% theta ))
+  #expit function
+  p0 <- plogis(t0)
+  for (i in (k0+1):n){
+    zero_first_order_index=rep(0,k)
+    suppressWarnings({ 
+      model_loop <- glmnet(dt_adp[,1:p], dt_adp$Y ,  
+                           family = "binomial", alpha = 0,
+                           standardize=FALSE,intercept=FALSE,
+                           lower.limits=-box_R,
+                           upper.limits=box_R,
+                           lambda=0)
+    })
+    theta_loop=as.numeric(model_loop$beta)
+    L2_Dis[i-k0]=sum( (theta_loop - theta)^2  )
+    return_val=I_pi_truncate(design_X, p0, n_d, epsilon = 0)
+    if (method.order ==1)
+    {
+      inv_X=solve(return_val , t(design_X) ) 
+      zero_first_order_index= -colSums(inv_X^2)*p0*(1-p0)
+    }else{
+      for (a in 1:k){
+        # Obtain the vector of fitted probabilities
+        zero_first_order_index[a]= sum(diag(solve(return_val+design_X[a,] %*% t(design_X[a,]) * p0[a] * (1 - p0[a]))  ))
+      }
+    }
+    action=which.min(zero_first_order_index)
+    n_d[action]=n_d[action]+1
+    # Generate the new linear predictor for BT model
+    linear_predictor <- dot(design_X[action,],theta)
+    # Generate the probabilities using the logistic function
+    probabilities <- exp(linear_predictor) / (1 + exp(linear_predictor))
+    # Generate the response variable Y based on the probabilities
+    y0 <- rbinom(1, size = 1, prob = probabilities)
+    dt_adp=as.data.frame(rbind(dt_adp,c(design_X[action,],y0 ) ) )
+    pi_loss[i-k0] = obj_f_full(n_d/i)
+    pi_L2_Dis[i-k0] = sum( (pi_optimized-n_d/i)^2 )
+  }
+  return(list(n_d=n_d, L2_Dis=L2_Dis, final_data=dt_adp, final_beta=theta_loop, pi_loss=pi_loss, pi_L2_Dis=pi_L2_Dis) )
+}
 
 ```
 
@@ -1293,9 +1342,9 @@ p=10
 p_plus = p + 1
 n_init=2*p
 n_max=100
-l_max=20000
+l_max=10000
 
-set.seed(12)
+set.seed(369)
 otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" ,reg=4)
 n_d_init=otput$n_d_init
 theta=otput$theta
@@ -1342,7 +1391,13 @@ k0=sum(n_d_init)
   pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full)
 }
 for(kk in 1:l_max){
-
+# opt non-random
+#ot_D= adapt_opt_D_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#ot_D=oracle_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0, n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
+#pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
+#pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss  
+  
 # GI1
 ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
 L2_Dis_Gi1_ave = L2_Dis_Gi1_ave + ot1$L2_Dis
@@ -1361,121 +1416,201 @@ L2_Dis_unif_ave=L2_Dis_unif_ave+ot_unif$L2_Dis
 pi_L2_Dis_unif_ave=pi_L2_Dis_unif_ave+ot_unif$pi_L2_Dis
 pi_loss_unif_ave=pi_loss_unif_ave+ot_unif$pi_loss
 
-# opt non-random
-ot_D= adapt_opt_D_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
 
-L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
-pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
-pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss
 
 # opt random select
-ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
-pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
-pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
+#ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
+#pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
+#pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
 
 }
 ```
 
 ```{r}
+# Conversion from cm to inches
+width_in_inches <- 4  
+height_in_inches <- 3  
+
+# Open a PDF device with specified dimensions
+pdf("p10_oracle_MSE.pdf", width = width_in_inches, height = height_in_inches)
+
 par(mar = c(4.2, 4.2, 1, 1))
 {
   node2=(k0+1):n_max
   # Create a vector of labels for the legend
   #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
-  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
+  legend_labels <- c("GI0","GI1", "Unif"  )
   plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.1*max(L2_Dis_Gi0_ave/l_max)), 
        type = "o",  xlab = "Sample Size",ylab="MSE",
-       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+       cex=0.7, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+#  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.1*max(L2_Dis_Gi0_ave/l_max)), 
+#    type = "l",  xlab = "Sample Size",ylab="MSE",
+#    cex=0.8, col = "grey30", lwd = 1 ,cex.lab=1.5)
   lines(node2, L2_Dis_Gi1_ave/l_max, type = "o",
-        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+        cex=0.2, col = "green",lwd = 1, lty=21, pch=19)
   lines(node2, L2_Dis_unif_ave/l_max, type = "o",
-        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
-  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
-        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
-  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",
-        cex=0.7,  col = 6, lty=5, pch=7)
+        cex=0.5, col = 4,lwd = 1, lty=4, pch=24)
+#  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
+#        cex=0.2,  col = "red",lwd = 1, lty=3, pch=3)
+  #  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",        cex=0.7,  col = 6, lty=5, pch=7)
   # Add a legend to the plot
   legend("topright", legend = legend_labels, 
-         col = c("grey30", "green", 4, "red", 6), 
-         lwd = c(1, 1, 1, 1, 1),
-         lty = c(1, 2, 4, 3, 5), 
+         col = c("grey30", "green", 4 ), 
+         lwd = c(1, 1, 1),
+         lty = c(1, 2, 4), 
          cex = 1,
-         pch = c(21,19, 24,3, 7), 
+         pch = c(21,19,24), 
          bty="n")
+  
+}
+# Close the PDF device
+dev.off()
+```
+ 
+```{r}
+# initial data
+p=10
+p_plus = p + 1
+n_init=2*p
+n_max=400
+l_max=1000
+
+set.seed(369)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" ,reg=4)
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+#GI0/GI1/uniform/opt non-random select/opt random
+  L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  L2_Dis_unif_ave=rep(0,n_max-k0)
+  L2_Dis_opt_D=rep(0,n_max-k0)
+  L2_Dis_opt_R=rep(0,n_max-k0)
+  L2_Dis_unif=rep(0,n_max-k0)
+  L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+  pi_L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  pi_L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  pi_L2_Dis_unif_ave=rep(0,n_max-k0)
+  pi_L2_Dis_opt_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_R=rep(0,n_max-k0)
+  pi_L2_Dis_unif=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+
+  
+  pi_loss_Gi0_ave=rep(0,n_max-k0)
+  pi_loss_Gi1_ave=rep(0,n_max-k0)
+  pi_loss_unif_ave=rep(0,n_max-k0)
+  pi_loss_opt_D=rep(0,n_max-k0)
+  pi_loss_opt_R=rep(0,n_max-k0)
+  pi_loss_unif=rep(0,n_max-k0)
+  pi_loss_opt_ave_D=rep(0,n_max-k0)
+  pi_loss_opt_ave_R=rep(0,n_max-k0)
+  
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=100000
+  learning_rate=0.00001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full)
+}
+for(kk in 1:l_max){
+# opt non-random
+#ot_D= adapt_opt_D_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#ot_D=oracle_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0, n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
+#pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
+#pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss  
+  
+# GI1
+ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+L2_Dis_Gi1_ave = L2_Dis_Gi1_ave + ot1$L2_Dis
+pi_L2_Dis_Gi1_ave=pi_L2_Dis_Gi1_ave+ot1$pi_L2_Dis
+pi_loss_Gi1_ave=pi_loss_Gi1_ave+ot1$pi_loss
+
+# GI0
+ot0=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+L2_Dis_Gi0_ave = L2_Dis_Gi0_ave + ot0$L2_Dis
+pi_L2_Dis_Gi0_ave=pi_L2_Dis_Gi0_ave+ot0$pi_L2_Dis
+pi_loss_Gi0_ave=pi_loss_Gi0_ave+ot0$pi_loss
+
+# unif
+ot_unif=adapt_unif_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_unif_ave=L2_Dis_unif_ave+ot_unif$L2_Dis
+pi_L2_Dis_unif_ave=pi_L2_Dis_unif_ave+ot_unif$pi_L2_Dis
+pi_loss_unif_ave=pi_loss_unif_ave+ot_unif$pi_loss
+
+
+
+# opt random select
+#ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
+#pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
+#pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
 
 }
-```
-
+``` 
+ 
 ```{r}
-par(mar = c(4.2, 4.2, 1, 1))
+# Conversion from cm to inches
+width_in_inches <- 4  
+height_in_inches <- 3  
+
+# Open a PDF device with specified dimensions
+pdf("p10_oracle_F.pdf", width = width_in_inches, height = height_in_inches)
+
+F_star=obj_f_full(pi_optimized)
+par(mar = c(4.2, 5, 1, 1))
 {
   node2=(k0+1):n_max
   # Create a vector of labels for the legend
   #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
-  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
-  plot(node2, pi_L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.2*max(pi_L2_Dis_Gi0_ave/l_max)), 
-       type = "o",  xlab = "Sample Size",ylab=expression(D[n]),
-       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
-  lines(node2, pi_L2_Dis_Gi1_ave/l_max, type = "o",
-        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
-  lines(node2, pi_L2_Dis_unif_ave/l_max, type = "o",
-        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
-  lines(node2, pi_L2_Dis_opt_ave_D/l_max, type = "o",
-        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
-  lines(node2, pi_L2_Dis_opt_ave_R/l_max, type = "o",
-        cex=0.7,  col = 6, lty=5, pch=7)
-  # Add a legend to the plot
-  legend("topright", legend = legend_labels, 
-         col = c("grey30", "green", 4, "red", 6), 
-         lwd = c(1, 1, 1, 1, 1),
-         lty = c(1, 2, 4, 3, 5), 
-         cex = 1,
-         pch = c(21,19, 24,3, 7), 
-         bty="n")
+  #legend_labels <- c("GI0","GI1", "Unif", "Oracle_GI0")
+  legend_labels <- c("GI0","GI1", "Unif" )
 
-}
-```
-
-```{r}
-par(mar = c(4.2, 4.2, 1, 1))
-{
-  node2=(k0+1):n_max
-  # Create a vector of labels for the legend
-  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
-  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
-  plot(node2, pi_loss_Gi0_ave/l_max ,ylim = c(0, 1.2*max(pi_loss_Gi0_ave/l_max)), 
+  plot(node2, pi_loss_Gi0_ave/l_max-F_star ,ylim = c(0, 1.2*max(pi_loss_Gi0_ave/l_max-F_star)), 
        type = "o",  xlab = "Sample Size",ylab=expression(F[n]),
-       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
-  lines(node2, pi_loss_Gi1_ave/l_max, type = "o",
-        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
-  lines(node2, pi_loss_unif_ave/l_max, type = "o",
-        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
-  lines(node2, pi_loss_opt_ave_D/l_max, type = "o",
-        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
-  lines(node2, pi_loss_opt_ave_R/l_max, type = "o",
-        cex=0.7,  col = 6, lty=5, pch=7)
+       cex=0.7, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, pi_loss_Gi1_ave/l_max-F_star, type = "o",
+        cex=0.2, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, pi_loss_unif_ave/l_max-F_star, type = "o",
+        cex=0.3, col = 4,lwd = 1, lty=4, pch=24)
+#  lines(node2, pi_loss_opt_ave_D/l_max-F_star, type = "o",
+#        cex=0.2,  col = "red",lwd = 1, lty=3, pch=3)
+ # lines(node2, pi_loss_opt_ave_R/l_max, type = "o",
+#        cex=0.7,  col = 6, lty=5, pch=7)
   # Add a legend to the plot
   legend("topright", legend = legend_labels, 
-         col = c("grey30", "green", 4, "red", 6), 
-         lwd = c(1, 1, 1, 1, 1),
-         lty = c(1, 2, 4, 3, 5), 
+         col = c("grey30", "green", 4 ), 
+         lwd = c(1, 1, 1),
+         lty = c(1, 2, 4), 
          cex = 1,
-         pch = c(21,19, 24,3, 7), 
+         pch = c(21,19, 24), 
          bty="n")
 
 }
+# Close the PDF device
+dev.off()
 ```
+
 \subsection{Task 3: Estimation Accuracy--$p$ and $k$ are large}
 ```{r}
 # initial data
 p=50
 p_plus = p + 1
-n_init=p
-n_max=100
-l_max=20000
+n_init=2*p
+n_max=200
+l_max=10000
 
-set.seed(77)
+set.seed(6)
 otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" ,reg=4)
 n_d_init=otput$n_d_init
 theta=otput$theta
@@ -1523,13 +1658,13 @@ k0=sum(n_d_init)
 for(kk in 1:l_max){
 
 # GI1
-ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = 100 , pi_optimized, n_d_init)
+ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
 L2_Dis_Gi1_ave = L2_Dis_Gi1_ave + ot1$L2_Dis
 pi_L2_Dis_Gi1_ave=pi_L2_Dis_Gi1_ave+ot1$pi_L2_Dis
 pi_loss_Gi1_ave=pi_loss_Gi1_ave+ot1$pi_loss
 
 # GI0
-ot0=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0 , n_max = 100 , pi_optimized, n_d_init)
+ot0=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
 L2_Dis_Gi0_ave = L2_Dis_Gi0_ave + ot0$L2_Dis
 pi_L2_Dis_Gi0_ave=pi_L2_Dis_Gi0_ave+ot0$pi_L2_Dis
 pi_loss_Gi0_ave=pi_loss_Gi0_ave+ot0$pi_loss
@@ -1541,500 +1676,194 @@ pi_L2_Dis_unif_ave=pi_L2_Dis_unif_ave+ot_unif$pi_L2_Dis
 pi_loss_unif_ave=pi_loss_unif_ave+ot_unif$pi_loss
 
 # opt non-random
-ot_D= adapt_opt_D_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
-pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
-pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss
+#ot_D=oracle_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0, n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
+#pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
+#pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss
+
 
 # opt random select
-ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
-pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
-pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
+#ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
+#pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
+#pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
 
 }
 ```
 
 ```{r}
+# Conversion from cm to inches
+width_in_inches <- 4  
+height_in_inches <- 3  
+
+# Open a PDF device with specified dimensions
+pdf("p50_oracle_MSE.pdf", width = width_in_inches, height = height_in_inches)
+
 par(mar = c(4.2, 4.2, 1, 1))
 {
   node2=(k0+1):n_max
   # Create a vector of labels for the legend
   #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
-  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
-  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0.9*min(L2_Dis_Gi0_ave/l_max), 1.1*max(L2_Dis_Gi0_ave/l_max)), 
+  #legend_labels <- c("GI0","GI1", "Unif", "Oracle_GI0" )
+  legend_labels <- c("GI0","GI1", "Unif" )
+
+  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0.8*min(L2_Dis_opt_ave_D/l_max), 1.1*max(L2_Dis_Gi0_ave/l_max)), 
        type = "o",  xlab = "Sample Size",ylab="MSE",
-       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+       cex=0.5, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+#  plot(node2, L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.1*max(L2_Dis_Gi0_ave/l_max)), 
+#    type = "l",  xlab = "Sample Size",ylab="MSE",
+#    cex=0.8, col = "grey30", lwd = 1 ,cex.lab=1.5)
   lines(node2, L2_Dis_Gi1_ave/l_max, type = "o",
-        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
+        cex=0.2, col = "green",lwd = 1, lty=21, pch=19)
   lines(node2, L2_Dis_unif_ave/l_max, type = "o",
-        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
-  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
-        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
-  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",
-        cex=0.7,  col = 6, lty=5, pch=7)
+        cex=0.3, col = 4,lwd = 1, lty=4, pch=24)
+#  lines(node2, L2_Dis_opt_ave_D/l_max, type = "o",
+#        cex=0.3,  col = "red",lwd = 1, lty=3, pch=3)
+  #  lines(node2, L2_Dis_opt_ave_R/l_max, type = "o",        cex=0.7,  col = 6, lty=5, pch=7)
   # Add a legend to the plot
   legend("topright", legend = legend_labels, 
-         col = c("grey30", "green", 4, "red", 6), 
-         lwd = c(1, 1, 1, 1, 1),
-         lty = c(1, 2, 4, 3, 5), 
+         col = c("grey30", "green", 4 ), 
+         lwd = c(1, 1, 1),
+         lty = c(1, 2, 4), 
          cex = 1,
-         pch = c(21,19, 24,3, 7), 
+         pch = c(21,19, 24), 
          bty="n")
-
+  
 }
+# Close the PDF device
+dev.off()
 ```
 
 ```{r}
-par(mar = c(4.2, 4.2, 1, 1))
+# initial data
+p=50
+p_plus = p + 1
+n_init=2*p
+n_max=400
+l_max=1000
+
+set.seed(6)
+otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" ,reg=4)
+n_d_init=otput$n_d_init
+theta=otput$theta
+init_data=otput$init_data
+design_X=otput$design_X
+offset_b=0
+k=nrow(design_X)
+k0=sum(n_d_init)
+#GI0/GI1/uniform/opt non-random select/opt random
+  L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  L2_Dis_unif_ave=rep(0,n_max-k0)
+  L2_Dis_opt_D=rep(0,n_max-k0)
+  L2_Dis_opt_R=rep(0,n_max-k0)
+  L2_Dis_unif=rep(0,n_max-k0)
+  L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+  pi_L2_Dis_Gi0_ave=rep(0,n_max-k0)
+  pi_L2_Dis_Gi1_ave=rep(0,n_max-k0)
+  pi_L2_Dis_unif_ave=rep(0,n_max-k0)
+  pi_L2_Dis_opt_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_R=rep(0,n_max-k0)
+  pi_L2_Dis_unif=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_D=rep(0,n_max-k0)
+  pi_L2_Dis_opt_ave_R=rep(0,n_max-k0)
+  
+  pi_loss_Gi0_ave=rep(0,n_max-k0)
+  pi_loss_Gi1_ave=rep(0,n_max-k0)
+  pi_loss_unif_ave=rep(0,n_max-k0)
+  pi_loss_opt_D=rep(0,n_max-k0)
+  pi_loss_opt_R=rep(0,n_max-k0)
+  pi_loss_unif=rep(0,n_max-k0)
+  pi_loss_opt_ave_D=rep(0,n_max-k0)
+  pi_loss_opt_ave_R=rep(0,n_max-k0)
+  
+{
+  pi_0_initial=rep(1/k,k)
+  num_iter=100000000
+  learning_rate=0.0000001
+  # using gradient descent to solve opt proportion
+  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-12)
+  }
+  
+for(kk in 1:l_max){
+
+# GI1
+ot1=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
+L2_Dis_Gi1_ave = L2_Dis_Gi1_ave + ot1$L2_Dis
+pi_L2_Dis_Gi1_ave=pi_L2_Dis_Gi1_ave+ot1$pi_L2_Dis
+pi_loss_Gi1_ave=pi_loss_Gi1_ave+ot1$pi_loss
+
+# GI0
+ot0=adapt_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
+L2_Dis_Gi0_ave = L2_Dis_Gi0_ave + ot0$L2_Dis
+pi_L2_Dis_Gi0_ave=pi_L2_Dis_Gi0_ave+ot0$pi_L2_Dis
+pi_loss_Gi0_ave=pi_loss_Gi0_ave+ot0$pi_loss
+
+# unif
+ot_unif=adapt_unif_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+L2_Dis_unif_ave=L2_Dis_unif_ave+ot_unif$L2_Dis
+pi_L2_Dis_unif_ave=pi_L2_Dis_unif_ave+ot_unif$pi_L2_Dis
+pi_loss_unif_ave=pi_loss_unif_ave+ot_unif$pi_loss
+
+# opt non-random
+#ot_D=oracle_seq_tr_glmnet_RA( design_X, init_data,  method.order = 0, n_max = n_max , pi_optimized, #n_d_init, box_R=3)
+#L2_Dis_opt_ave_D = L2_Dis_opt_ave_D + ot_D$L2_Dis
+#pi_L2_Dis_opt_ave_D=pi_L2_Dis_opt_ave_D+ot_D$pi_L2_Dis
+#pi_loss_opt_ave_D=pi_loss_opt_ave_D+ot_D$pi_loss
+
+
+# opt random select
+#ot_R= adapt_opt_R_glmnet_RA( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
+#L2_Dis_opt_ave_R = L2_Dis_opt_ave_R + ot_R$L2_Dis
+#pi_L2_Dis_opt_ave_R=pi_L2_Dis_opt_ave_R+ot_R$pi_L2_Dis
+#pi_loss_opt_ave_R=pi_loss_opt_ave_R+ot_R$pi_loss
+
+}
+```
+ 
+```{r}
+# Conversion from cm to inches
+width_in_inches <- 4  
+height_in_inches <- 3  
+
+# Open a PDF device with specified dimensions
+pdf("p50_oracle_F.pdf", width = width_in_inches, height = height_in_inches)
+
+F_star=obj_f_full(pi_optimized)
+par(mar = c(4.2, 5, 1, 1))
 {
   node2=(k0+1):n_max
   # Create a vector of labels for the legend
   #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
-  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
-  plot(node2, pi_L2_Dis_Gi0_ave/l_max ,ylim = c(0, 1.2*max(pi_L2_Dis_Gi0_ave/l_max)), 
-       type = "o",  xlab = "Sample Size",ylab=expression(D[n]),
-       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
-  lines(node2, pi_L2_Dis_Gi1_ave/l_max, type = "o",
-        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
-  lines(node2, pi_L2_Dis_unif_ave/l_max, type = "o",
-        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
-  lines(node2, pi_L2_Dis_opt_ave_D/l_max, type = "o",
-        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
-  lines(node2, pi_L2_Dis_opt_ave_R/l_max, type = "o",
-        cex=0.7,  col = 6, lty=5, pch=7)
-  # Add a legend to the plot
-  legend("topright", legend = legend_labels, 
-         col = c("grey30", "green", 4, "red", 6), 
-         lwd = c(1, 1, 1, 1, 1),
-         lty = c(1, 2, 4, 3, 5), 
-         cex = 1,
-         pch = c(21,19, 24,3, 7), 
-         bty="n")
-
-}
-```
-
-```{r}
-par(mar = c(4.2, 4.2, 1, 1))
-{
-  node2=(k0+1):n_max
-  # Create a vector of labels for the legend
-  #legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random","Opt_GI0","Opt_GI1")
-  legend_labels <- c("GI0","GI1", "Unif", "Opt_deterministic", "Opt_random")
-  plot(node2, pi_loss_Gi0_ave/l_max ,ylim = c(0, 2*max(pi_loss_Gi0_ave/l_max)), 
+  #legend_labels <- c("GI0","GI1", "Unif", "Oracle_GI0")
+  legend_labels <- c("GI0","GI1", "Unif" )
+  plot(node2, pi_loss_Gi0_ave/l_max-F_star ,ylim = c(0, 1.2*max(pi_loss_Gi0_ave/l_max-F_star)), 
        type = "o",  xlab = "Sample Size",ylab=expression(F[n]),
-       cex=0.8, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
-  lines(node2, pi_loss_Gi1_ave/l_max, type = "o",
-        cex=0.5, col = "green",lwd = 1, lty=2, pch=19)
-  lines(node2, pi_loss_unif_ave/l_max, type = "o",
-        cex=0.7, col = 4,lwd = 1, lty=4, pch=24)
-  lines(node2, pi_loss_opt_ave_D/l_max, type = "o",
-        cex=0.5,  col = "red",lwd = 1, lty=3, pch=3)
-  lines(node2, pi_loss_opt_ave_R/l_max, type = "o",
-        cex=0.7,  col = 6, lty=5, pch=7)
+       cex=0.7, col = "grey30", lwd = 1, pch=21,cex.lab=1.5)
+  lines(node2, pi_loss_Gi1_ave/l_max-F_star, type = "o",
+        cex=0.2, col = "green",lwd = 1, lty=2, pch=19)
+  lines(node2, pi_loss_unif_ave/l_max-F_star, type = "o",
+        cex=0.5, col = 4,lwd = 1, lty=4, pch=24)
+#  lines(node2, pi_loss_opt_ave_D/l_max-F_star, type = "o",
+#        cex=0.2,  col = "red",lwd = 1, lty=3, pch=3)
+ # lines(node2, pi_loss_opt_ave_R/l_max, type = "o",
+#        cex=0.7,  col = 6, lty=5, pch=7)
   # Add a legend to the plot
   legend("topright", legend = legend_labels, 
-         col = c("grey30", "green", 4, "red", 6), 
-         lwd = c(1, 1, 1, 1, 1),
-         lty = c(1, 2, 4, 3, 5), 
+         col = c("grey30", "green", 4 ), 
+         lwd = c(1, 1, 1 ),
+         lty = c(1, 2, 4 ), 
          cex = 1,
-         pch = c(21,19, 24,3, 7), 
+         pch = c(21,19, 24 ), 
          bty="n")
 
 }
-```
-
-\subsection{Task 4: Kendall's $\tau$ correlation.}
-Full graph $p=10$
-```{r}
-# initial data
-p=10
-p_plus = p + 1
-n_init=2*p
-n_max=2000
-l_max=100
-
-set.seed(7)
-otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="full" )
-n_d_init=otput$n_d_init
-theta=otput$theta
-init_data=otput$init_data
-design_X=otput$design_X
-edges=otput$pair_matrix
-offset_b=0
-k=nrow(design_X)
-k0=sum(n_d_init)
-
-#GI0/GI1/uniform/opt non-random select/opt random
-kendall_Gi0_ave=rep(0,n_max-k0)
-kendall_Gi1_ave=rep(0,n_max-k0)
-kendall_unif_ave=rep(0,n_max-k0)
-#  kendall_opt_D=rep(0,n_max-k0)
-kendall_opt_US_ave=rep(0,n_max-k0)
-#  kendall_unif=rep(0,n_max-k0)
-kendall_opt_ave_D=rep(0,n_max-k0)
-kendall_opt_ave_R=rep(0,n_max-k0)
-
-{
-  pi_0_initial=rep(1/k,k)
-  num_iter=1000000
-  learning_rate=0.000001
-  # using gradient descent to solve opt proportion
-  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
-}
-
-
-for(kk in 1:l_max){
-  
-  # GI1
-  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
-  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
-  
-  # GI0
-#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
-#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
-  
-  # unif
-  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
-  
-  # opt non-random
-  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
-  
-  # opt random
-  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
-
-  # uncertainly sampling
-  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
-  
-  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
-}
-```
-
-```{r}
-par(mar = c(4.2, 4.2, 1, 1)) 
-{
-  node2 <- (k0+1):n_max
-  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Sampling")
-  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
-       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
-       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
-  
-  lines(node2, kendall_unif_ave/l_max, type = "l",
-        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
-  
-  lines(node2, kendall_opt_ave_D/l_max, type = "l",
-        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
-  
-  lines(node2, kendall_opt_ave_R/l_max, type = "l",
-        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
-  
-  lines(node2, kendall_opt_US_ave/l_max, type = "l",
-        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
-  
-  legend("bottomright", legend = legend_labels, 
-         col = c("grey30", 4, "red", 6,7), 
-         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
-         lty = c(1, 4, 3, 5,6), 
-         cex = 1.5,  # Increase cex for a bigger text in the legend
-         bty = "n")
-}
-
-```
-
-4-rugelar graph $p=10$
-```{r}
-# initial data
-p=10
-p_plus = p + 1
-n_init=2*p
-n_max=2000
-l_max=100
-
-set.seed(7)
-otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" )
-n_d_init=otput$n_d_init
-theta=otput$theta
-init_data=otput$init_data
-design_X=otput$design_X
-edges=otput$pair_matrix
-offset_b=0
-k=nrow(design_X)
-k0=sum(n_d_init)
-
-#GI0/GI1/uniform/opt non-random select/opt random
-kendall_Gi0_ave=rep(0,n_max-k0)
-kendall_Gi1_ave=rep(0,n_max-k0)
-kendall_unif_ave=rep(0,n_max-k0)
-#  kendall_opt_D=rep(0,n_max-k0)
-kendall_opt_US_ave=rep(0,n_max-k0)
-#  kendall_unif=rep(0,n_max-k0)
-kendall_opt_ave_D=rep(0,n_max-k0)
-kendall_opt_ave_R=rep(0,n_max-k0)
-
-{
-  pi_0_initial=rep(1/k,k)
-  num_iter=1000000
-  learning_rate=0.00005
-  # using gradient descent to solve opt proportion
-  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
-}
-
-for(kk in 1:l_max){
-  
-  # GI1
-  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
-  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
-  
-  # GI0
-#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
-#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
-  
-  # unif
-  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
-  
-  # opt non-random
-  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
-  
-  # opt random
-  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
-
-  # uncertainly sampling
-  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
-  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
-}
-```
-
-```{r}
-par(mar = c(4.2, 4.2, 1, 1)) 
-{
-  node2 <- (k0+1):n_max
-  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Samp")
-  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
-       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
-       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
-  
-  lines(node2, kendall_unif_ave/l_max, type = "l",
-        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
-  
-  lines(node2, kendall_opt_ave_D/l_max, type = "l",
-        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
-  
-  lines(node2, kendall_opt_ave_R/l_max, type = "l",
-        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
-  
-  lines(node2, kendall_opt_US_ave/l_max, type = "l",
-        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
-  
-  legend("bottomright", legend = legend_labels, 
-         col = c("grey30", 4, "red", 6,7), 
-         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
-         lty = c(1, 4, 3, 5,6), 
-         cex = 1.5,  # Increase cex for a bigger text in the legend
-         bty = "n")
-}
-
-```
-
-Full graph $p=50$
-```{r}
-# initial data
-p=50
-p_plus = p + 1
-n_init=p
-n_max=2000
-l_max=100
-
-set.seed(7)
-otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="full" )
-n_d_init=otput$n_d_init
-theta=otput$theta
-init_data=otput$init_data
-design_X=otput$design_X
-edges=otput$pair_matrix
-offset_b=0
-k=nrow(design_X)
-k0=sum(n_d_init)
-
-#GI0/GI1/uniform/opt non-random select/opt random
-kendall_Gi0_ave=rep(0,n_max-k0)
-kendall_Gi1_ave=rep(0,n_max-k0)
-kendall_unif_ave=rep(0,n_max-k0)
-#  kendall_opt_D=rep(0,n_max-k0)
-kendall_opt_US_ave=rep(0,n_max-k0)
-#  kendall_unif=rep(0,n_max-k0)
-kendall_opt_ave_D=rep(0,n_max-k0)
-kendall_opt_ave_R=rep(0,n_max-k0)
-
-{
-  pi_0_initial=rep(1/k,k)
-  num_iter=1000000
-  learning_rate=0.00000005
-  # using gradient descent to solve opt proportion
-  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
-}
-
-
-for(kk in 1:l_max){
-  
-  # GI1
-  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
-  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
-  
-  # GI0
-#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
-#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
-  
-  # unif
-  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
-  
-  # opt non-random
-  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
-  
-  # opt random
-  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
-
-  # uncertainly sampling
-  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
-  
-  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
-}
-```
-
-```{r}
-par(mar = c(4.2, 4.2, 1, 1)) 
-{
-  node2 <- (k0+1):n_max
-  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Sampling")
-  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
-       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
-       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
-  lines(node2, kendall_unif_ave/l_max, type = "l",
-        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
-  lines(node2, kendall_opt_ave_D/l_max, type = "l",
-        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
-  lines(node2, kendall_opt_ave_R/l_max, type = "l",
-        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
-  lines(node2, kendall_opt_US_ave/l_max, type = "l",
-        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
-  legend("bottomright", legend = legend_labels, 
-         col = c("grey30", 4, "red", 6,7), 
-         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
-         lty = c(1, 4, 3, 5,6), 
-         cex = 1.5,  # Increase cex for a bigger text in the legend
-         bty = "n")
-}
-```
-
-4-rugelar graph $p=50$
-```{r}
-# initial data
-p=50
-p_plus = p + 1
-n_init=p
-n_max=2000
-l_max=100
-
-set.seed(77)
-otput=init_edge_generate_RA(p_plus=p_plus, n_init=n_init, method="regular" )
-n_d_init=otput$n_d_init
-theta=otput$theta
-init_data=otput$init_data
-design_X=otput$design_X
-edges=otput$pair_matrix
-offset_b=0
-k=nrow(design_X)
-k0=sum(n_d_init)
-
-#GI0/GI1/uniform/opt non-random select/opt random
-kendall_Gi0_ave=rep(0,n_max-k0)
-kendall_Gi1_ave=rep(0,n_max-k0)
-kendall_unif_ave=rep(0,n_max-k0)
-#  kendall_opt_D=rep(0,n_max-k0)
-kendall_opt_US_ave=rep(0,n_max-k0)
-#  kendall_unif=rep(0,n_max-k0)
-kendall_opt_ave_D=rep(0,n_max-k0)
-kendall_opt_ave_R=rep(0,n_max-k0)
-
-{
-  pi_0_initial=rep(1/k,k)
-  num_iter=1000000
-  learning_rate=0.00000005
-  # using gradient descent to solve opt proportion
-  pi_optimized <- projected_gradient_descent(pi_0_initial, num_iters=num_iter, learning_rate=learning_rate,  grad_obj=grad_f_full, tol = 1e-8)
-}
-
-
-for(kk in 1:l_max){
-  
-  # GI1
-  ot1=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 1 , n_max = n_max , pi_optimized, n_d_init)
-  kendall_Gi1_ave = kendall_Gi1_ave + ot1$kendall
-  
-  # GI0
-#  ot0=adapt_seq_tr_glmnet_RA_kendall( design_X, init_data,  method.order = 0 , n_max = n_max , pi_optimized, n_d_init)
-#  kendall_Gi0_ave = kendall_Gi0_ave + ot0$kendall
-  
-  # unif
-  ot_unif=adapt_unif_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_unif_ave=kendall_unif_ave+ot_unif$kendall
-  
-  # opt non-random
-  ot_D= adapt_opt_D_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_D = kendall_opt_ave_D + ot_D$kendall
-  
-  # opt random
-  ot_R= adapt_opt_R_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, box_R=3)
-  kendall_opt_ave_R = kendall_opt_ave_R + ot_R$kendall
-
-  # uncertainly sampling
-  ot_US=adapt_US_glmnet_RA_kendall( design_X, init_data,  n_max = n_max , pi_optimized, n_d_init, edges, box_R=3)
-  kendall_opt_US_ave = kendall_opt_US_ave + ot_US$kendall
-}
-```
-
-```{r}
-par(mar = c(4.2, 4.2, 1, 1)) 
-{
-  node2 <- (k0+1):n_max
-  legend_labels <- c("GI1", "Unif", "Opt_deterministic", "Opt_random", "Uncertainty Samp")
-  plot(node2, kendall_Gi1_ave/l_max, ylim = c(0.2, 1), 
-       type = "l", xlab = "Sample Size", ylab = "Kendall's Correlation",
-       cex = 1, col = "grey30", lwd = 2)  # Increase lwd here for a bolder line
-  
-  lines(node2, kendall_unif_ave/l_max, type = "l",
-        cex = 1, col = 4, lwd = 2, lty = 4)  # Increase lwd here
-  
-  lines(node2, kendall_opt_ave_D/l_max, type = "l",
-        cex = 1, col = "red", lwd = 2, lty = 3)  # Increase lwd here
-  
-  lines(node2, kendall_opt_ave_R/l_max, type = "l",
-        cex = 1, col = 6, lty = 5, lwd = 2)  # Increase lwd here
-  
-  lines(node2, kendall_opt_US_ave/l_max, type = "l",
-        cex = 1, col = 7, lty = 6, lwd = 2)  # Increase lwd here
-  
-  legend("bottomright", legend = legend_labels, 
-         col = c("grey30", 4, "red", 6,7), 
-         lwd = c(2, 2, 2, 2,2),  # Increase lwd in legend
-         lty = c(1, 4, 3, 5,6), 
-         cex = 1.5,  # Increase cex for a bigger text in the legend
-         bty = "n")
-}
-
-```
-
-
-\subsection{Task 5: Impact of the side length of compact set $\Theta$}
+# Close the PDF device
+dev.off()
+``` 
+\subsection{Task 4: Impact of the side length of compact set $\Theta$}
 ```{r}
 # initial data
 p=50
