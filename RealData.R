@@ -147,8 +147,8 @@ find_closest_indices <- function(theta,dataset) {
 {
   epsilon = 1e-11
   set.seed(365)
-  n_max  = 4000
-  n_init = 100
+  n_max  = 4000-1
+  n_init = 100-1
   l_max=100
   Kendall_rank_Gi1_full=matrix(0, nrow = l_max, ncol = n_max-n_init)
   Kendall_rank_Gi0_full=matrix(0, nrow = l_max, ncol = n_max-n_init)

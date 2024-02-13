@@ -37,20 +37,20 @@ plot_median_and_boxplots <- function(y, positions, nodes, pch_ind, col_ind) {
 }
 
 par(mar = c(4.2, 4.2, 1, 1))
-node=101:3900
-positions=c(seq(150,3700,400),300)
+node=101:3900-1
+positions=c(seq(150,3700,400),300)-1
 #colMeans(GI1_final)/apply(GI1_final, 2, median)
-plot(101:4000, colMeans(GI1_final), ylim=c(0.2,0.8),type = "l",
+plot(101:4000-1, colMeans(GI1_final), ylim=c(0.2,0.8),type = "l",
      ylab="Kendall rank correlation",xlab="Number of comparisons", 
      cex=1, col = "grey30", lwd = 1,cex.lab=1.5)
 plot_median_and_boxplots(GI1_final,positions,node,pch_ind = 1,col_ind = "grey30")
-lines(101:4000, colMeans(GI0_final),type="l",col="red",
+lines(101:4000-1, colMeans(GI0_final),type="l",col="red",
       lty=2, lwd=1)
 plot_median_and_boxplots(GI0_final,positions,node,pch_ind = 4,col_ind = "red")
-lines(101:4000, colMeans(UNIF_final),type="l",col="blue", 
+lines(101:4000-1, colMeans(UNIF_final),type="l",col="blue", 
       lty=4,lwd=1)
 plot_median_and_boxplots(UNIF_final,positions,node,pch_ind = 2,col_ind = "blue")
-lines(101:4000, colMeans(US_final),type="l",col="orange",  
+lines(101:4000-1, colMeans(US_final),type="l",col="orange",  
       lty=5, lwd=1)
 plot_median_and_boxplots(US_final,positions,node,pch_ind = 8,col_ind = "orange")
 
