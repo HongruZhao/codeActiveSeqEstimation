@@ -1,16 +1,25 @@
-# Source code in “Globally-Optimal Greedy Experiment Selection for Active Sequential Estimation”
+# Globally-Optimal Greedy Experiment Selection for Active Sequential Estimation
 
-## Download the Datasets
-Download the datasets at: https://github.com/HongruZhao/codeActiveSeqEstimation
+This repository provides source code accompanying the paper:
 
-## Codes for Simulated Data 
-Download the codes at: https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/AOS_simulation.Rmd
+> **Globally-Optimal Greedy Active Sequential Estimation**  
+> Xiaoou Li and Hongru Zhao (2025), *IEEE Transactions on Information Theory* (Accepted)
 
-## Codes for Real Data 
-Download the codes at: https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealData.R
-and https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealDataPlot.R
+## Datasets
 
+Download datasets used in the paper:
 
-## References
+- [Datasets](https://github.com/HongruZhao/codeActiveSeqEstimation)
 
-Xiaoou, L., Hongru, Z. (2023+) Globally-Optimal Greedy Experiment Selection for Active Sequential Estimation.  
+## Code Overview
+
+### Simulated Data
+- [simulation.Rmd](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/AOS_simulation.Rmd):
+  - Implements simulation studies demonstrating the performance of the proposed globally-optimal greedy selection method.
+
+### Real Data Analysis
+- [RealData.R](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealData.R):
+  - Analysis code applying the proposed methods to real-world datasets.
+
+- [RealDataPlot.R](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealDataPlot.R):
+  - Visualization code to reproduce figures and plots shown in the paper.
