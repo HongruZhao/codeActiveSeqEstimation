@@ -1,25 +1,34 @@
 # Globally-Optimal Greedy Experiment Selection for Active Sequential Estimation
 
-This repository provides source code accompanying the paper:
+This repository contains the source code accompanying the paper:
 
-> **Globally-Optimal Greedy Active Sequential Estimation**  
-> Xiaoou Li and Hongru Zhao (2025), *IEEE Transactions on Information Theory* (Accepted)
+> **Globally-Optimal Greedy Experiment Selection for Active Sequential Estimation**  
+> Xiaoou Li and Hongru Zhao (2025), *IEEE Transactions on Information Theory* (Accepted).
+
+The repository provides implementations for both simulated and real-data analysis, demonstrating the performance and applicability of the globally-optimal greedy selection method.
+
+## Repository Contents
+
+### Simulated Data
+- [`simulation.Rmd`](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/simulation.Rmd):
+  - Conducts extensive simulation studies to illustrate and validate the performance of the globally-optimal greedy experiment selection method introduced in the paper.
+
+### Real Data Analysis
+- [`RealData.R`](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealData.R):
+  - Implements the active sequential estimation method on real-world datasets, demonstrating practical applicability and performance.
+
+- [`RealDataPlot.R`](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealDataPlot.R):
+  - Provides visualization code to reproduce figures and plots presented in the paper, offering clear graphical representations of results.
 
 ## Datasets
 
-Download datasets used in the paper:
+Datasets utilized in the paper are available here:
 
 - [Datasets](https://github.com/HongruZhao/codeActiveSeqEstimation)
 
-## Code Overview
 
-### Simulated Data
-- [simulation.Rmd](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/AOS_simulation.Rmd):
-  - Implements simulation studies demonstrating the performance of the proposed globally-optimal greedy selection method.
+## Authors
 
-### Real Data Analysis
-- [RealData.R](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealData.R):
-  - Analysis code applying the proposed methods to real-world datasets.
+- [Xiaoou Li](#)
+- [Hongru Zhao](https://github.com/HongruZhao)
 
-- [RealDataPlot.R](https://github.com/HongruZhao/codeActiveSeqEstimation/blob/main/RealDataPlot.R):
-  - Visualization code to reproduce figures and plots shown in the paper.
