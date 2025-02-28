@@ -29,6 +29,5 @@ Datasets utilized in the paper are available here:
 
 ## Authors
 
-- [Xiaoou Li](#)
 - [Hongru Zhao](https://github.com/HongruZhao)
 
